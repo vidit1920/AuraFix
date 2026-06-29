@@ -23,7 +23,8 @@ sample-java/.git/
 # Build output for the multi-language samples
 sample-java/target/
 
-# Editor / OS noise
+# Editor / tooling / OS noise
 .DS_Store
 .idea/
+.claude/
 *.log
