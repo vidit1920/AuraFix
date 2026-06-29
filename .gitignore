@@ -1,0 +1,29 @@
+# Secrets — NEVER commit these
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.pytest_report.json
+
+# RAG vector store cache (regenerated on demand)
+chroma_db/
+
+# Bundled sample repos ship as plain folders. If one is ever git-initialized
+# for local development, don't track its nested .git.
+sample-repo/.git/
+sample-shop/.git/
+sample-java/.git/
+
+# Build output for the multi-language samples
+sample-java/target/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+*.log

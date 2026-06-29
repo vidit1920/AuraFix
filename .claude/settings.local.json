@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./venv/Scripts/python.exe -c \"import pypdf; print\\('pypdf', pypdf.__version__\\)\")",
+      "Bash(./venv/Scripts/python.exe -c \"import fitz; print\\('pymupdf ok'\\)\")",
+      "Bash(./venv/Scripts/python.exe -c \"import pdfplumber; print\\('pdfplumber ok'\\)\")",
+      "Bash(./venv/Scripts/python.exe -m pip install pypdf --quiet)",
+      "Bash(./venv/Scripts/python.exe -c ' *)"
+    ]
+  }
+}

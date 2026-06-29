@@ -1,0 +1,12 @@
+# AuraFix dashboard theme — dark, modern, violet accent. Tuned for a clean
+# professional look suitable for hosting and screenshots.
+[theme]
+base = "dark"
+primaryColor = "#3b82f6"
+backgroundColor = "#0b0e16"
+secondaryBackgroundColor = "#141927"
+textColor = "#e7e9f0"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
