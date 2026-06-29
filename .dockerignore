@@ -1,0 +1,13 @@
+venv/
+.venv/
+chroma_db/
+__pycache__/
+*.pyc
+.git/
+.env
+.pytest_cache/
+sample-repo/.git/
+sample-shop/.git/
+sample-java/.git/
+node_modules/
+*.log
