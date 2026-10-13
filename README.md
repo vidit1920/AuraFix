@@ -90,6 +90,10 @@ The repo ships a `Dockerfile` that runs as a non-root user and starts
    `STREAMLIT_SERVER_CORS_ALLOWED_ORIGINS=https://<your-app>.onrender.com`.
 3. Do **not** set a shared LLM key - users bring their own in the app.
 
+A [`render.yaml`](render.yaml) blueprint is included that declares the service,
+the Docker build, the health check, and every required env var (secrets marked
+`sync: false`, so no real values are committed).
+
 Secrets are provided at runtime only; nothing sensitive is baked into the image
 (`.dockerignore` excludes `.env`, service-account JSON, and key material).
 
