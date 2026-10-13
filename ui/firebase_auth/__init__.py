@@ -22,10 +22,22 @@ _FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fronte
 _component = components.declare_component("aurafix_firebase_auth", path=_FRONTEND_DIR)
 
 
-def firebase_login(config: dict, providers: list[str], key: str = "firebase_login") -> dict | None:
-    """Render the sign-in buttons. Returns a dict with the (unverified) token
-    the first time a sign-in completes, else None.
+def firebase_login(config: dict, providers: list[str], persist: bool = False,
+                   signout: bool = False, key: str = "firebase_login") -> dict | None:
+    """Render the sign-in buttons and manage persistence. Returns a dict the
+    first time something happens, else None.
 
-    Returned dict shape: {"idToken": str, "profile": {...}, "nonce": str}.
+    Args:
+        persist: if True, a successful sign-in uses Firebase local persistence
+            so the user stays signed in across browser restarts (the server
+            caps this at 30 days). If False, the session ends with the tab.
+        signout: if True, the component signs the user out of Firebase
+            (clearing persistence) instead of restoring/showing buttons.
+
+    Returned dict shapes:
+        {"idToken": str, "profile": {...}, "nonce": str, "restored": bool}
+            — a new or restored sign-in to verify.
+        {"signedOut": True, "nonce": str} — a completed sign-out.
     The ``nonce`` lets the caller ignore a value it has already consumed."""
-    return _component(config=config, providers=providers, key=key, default=None)
+    return _component(config=config, providers=providers, persist=bool(persist),
+                      signout=bool(signout), key=key, default=None)

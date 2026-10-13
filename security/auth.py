@@ -150,6 +150,17 @@ def verify_token(id_token: str) -> dict:
     except Exception:  # noqa: BLE001 — never leak vendor internals to the user
         raise AuthError("Your sign-in could not be verified. Please sign in again.")
 
+    # Cap how long a persisted ("keep me signed in") session may last. auth_time
+    # is when the user actually authenticated; it does not change when Firebase
+    # silently refreshes the token, so this enforces a hard re-login after the
+    # configured number of days.
+    import time as _time
+    auth_time = claims.get("auth_time")
+    if auth_time:
+        max_days = session_max_days()
+        if _time.time() - float(auth_time) > max_days * 86400:
+            raise AuthError(f"Your {max_days}-day session has expired. Please sign in again.")
+
     return {
         "uid": claims.get("uid") or claims.get("user_id") or "",
         "email": claims.get("email") or "",
@@ -160,6 +171,15 @@ def verify_token(id_token: str) -> dict:
         "auth_time": claims.get("auth_time"),
         "exp": claims.get("exp"),
     }
+
+
+def session_max_days() -> int:
+    """How long a 'keep me signed in' session may last before the user must
+    re-authenticate. Default 30 days; override with AURAFIX_SESSION_MAX_DAYS."""
+    try:
+        return max(1, int(os.environ.get("AURAFIX_SESSION_MAX_DAYS", "30")))
+    except ValueError:
+        return 30
 
 
 def admin_emails() -> set[str]:
