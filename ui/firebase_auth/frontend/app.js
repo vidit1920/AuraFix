@@ -4,16 +4,25 @@
 // SDK from gstatic and so no inline <script> is needed — which keeps the
 // app's Content-Security-Policy strict (script-src 'self' + gstatic only).
 //
-// It speaks Streamlit's component postMessage protocol directly (no build
-// step): announces readiness, receives the Firebase web config via the
-// render event, and — after a user completes a popup sign-in — posts the
-// resulting ID token back to Python, which verifies it server-side.
+// Responsibilities:
+//   * Show Google / GitHub buttons and complete a popup sign-in.
+//   * "Keep me signed in": when enabled, sign in with Firebase LOCAL
+//     persistence so the session survives a browser restart; otherwise keep
+//     it in memory only (ends with the tab). The server caps a persisted
+//     session at 30 days.
+//   * Auto-restore: on load, if a persisted user already exists, silently
+//     hand a fresh ID token to Python so the session resumes without a click.
+//   * Sign out: clear the Firebase session on request.
+// It verifies nothing itself — every token is checked server-side.
 
 import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import {
   getAuth,
   setPersistence,
+  browserLocalPersistence,
   inMemoryPersistence,
+  onAuthStateChanged,
+  signOut,
   GoogleAuthProvider,
   GithubAuthProvider,
   signInWithPopup,
@@ -24,7 +33,12 @@ const msg = $("msg");
 
 let auth = null;
 let initialised = false;
+let watching = false;
 let busy = false;
+let emitted = false;       // one sign-in/restore emit per load
+let persist = false;       // "keep me signed in" state from args
+let signoutMode = false;
+let signedOutDone = false;
 
 // --- Streamlit protocol helpers -------------------------------------------
 function post(type, extra) {
@@ -34,8 +48,7 @@ function setValue(value) {
   post("streamlit:setComponentValue", { value, dataType: "json" });
 }
 function sendHeight() {
-  const h = document.documentElement.scrollHeight;
-  post("streamlit:setFrameHeight", { height: h });
+  post("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight });
 }
 function ready() {
   post("streamlit:componentReady", { apiVersion: 1 });
@@ -46,10 +59,16 @@ function showMessage(text, isError) {
   msg.className = isError ? "msg error" : "msg";
   sendHeight();
 }
-
 function setBusy(state) {
   busy = state;
   document.querySelectorAll("button.sso").forEach((b) => (b.disabled = state));
+}
+function cryptoNonce() {
+  try { return crypto.randomUUID(); }
+  catch (_) { return String(Date.now()) + Math.random().toString(16).slice(2); }
+}
+function profileOf(user) {
+  return { email: user.email || "", name: user.displayName || "", picture: user.photoURL || "" };
 }
 
 // --- Firebase --------------------------------------------------------------
@@ -62,9 +81,21 @@ function ensureFirebase(config) {
   try {
     const app = getApps().length ? getApps()[0] : initializeApp(config);
     auth = getAuth(app);
-    // Keep nothing in browser storage: the token only needs to live long
-    // enough to hand to the server, which then owns the session.
-    setPersistence(auth, inMemoryPersistence).catch(() => {});
+    if (!watching) {
+      watching = true;
+      // Fires on load with a persisted user (from a prior "keep me signed
+      // in"), and after a popup sign-in. We auto-emit only for the restore
+      // case; the explicit sign-in path emits on its own.
+      onAuthStateChanged(auth, (user) => {
+        if (signoutMode || emitted || busy) return;
+        if (user) {
+          emitted = true;
+          user.getIdToken(true).then((idToken) => {
+            setValue({ idToken, profile: profileOf(user), nonce: cryptoNonce(), restored: true });
+          }).catch(() => { emitted = false; });
+        }
+      });
+    }
     initialised = true;
     return true;
   } catch (e) {
@@ -80,28 +111,20 @@ async function signIn(kind) {
   msg.innerHTML = '<span class="spin"></span>Opening sign-in window…';
   sendHeight();
   try {
-    let provider;
-    if (kind === "google") {
-      provider = new GoogleAuthProvider();
-    } else if (kind === "github") {
-      provider = new GithubAuthProvider();
-    } else {
-      showMessage("That sign-in method isn't available.", true);
-      setBusy(false);
-      return;
-    }
+    // Persistence must be set before the popup. Local = survives restart;
+    // in-memory = gone when the tab closes.
+    await setPersistence(auth, persist ? browserLocalPersistence : inMemoryPersistence);
+
+    const provider = kind === "google" ? new GoogleAuthProvider()
+                   : kind === "github" ? new GithubAuthProvider() : null;
+    if (!provider) { showMessage("That sign-in method isn't available.", true); setBusy(false); return; }
+
     const result = await signInWithPopup(auth, provider);
     const user = result.user;
-    const idToken = await user.getIdToken(/* forceRefresh */ true);
-    const profile = {
-      email: user.email || "",
-      name: user.displayName || "",
-      picture: user.photoURL || "",
-    };
+    const idToken = await user.getIdToken(true);
+    emitted = true;
     showMessage("Signed in. Loading…", false);
-    // A fresh nonce so Python always sees a new value and can ignore one it
-    // has already consumed.
-    setValue({ idToken, profile, nonce: cryptoNonce() });
+    setValue({ idToken, profile: profileOf(user), nonce: cryptoNonce(), restored: false });
   } catch (e) {
     const code = (e && e.code) || "";
     if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") {
@@ -115,12 +138,11 @@ async function signIn(kind) {
   }
 }
 
-function cryptoNonce() {
-  try {
-    return crypto.randomUUID();
-  } catch (_) {
-    return String(Date.now()) + Math.random().toString(16).slice(2);
-  }
+async function doSignOut() {
+  if (signedOutDone) return;
+  signedOutDone = true;
+  try { if (auth) await signOut(auth); } catch (_) {}
+  setValue({ signedOut: true, nonce: cryptoNonce() });
 }
 
 // --- Render ----------------------------------------------------------------
@@ -130,26 +152,29 @@ function onRender(event) {
   const args = data.args || {};
   const config = args.config || {};
   const providers = Array.isArray(args.providers) ? args.providers : ["google"];
+  persist = !!args.persist;
 
-  if (!ensureFirebase(config)) {
-    sendHeight();
+  if (!ensureFirebase(config)) { sendHeight(); return; }
+
+  // Sign-out request: clear Firebase and report back; don't show buttons.
+  if (args.signout) {
+    signoutMode = true;
+    document.querySelectorAll("button.sso").forEach((b) => (b.hidden = true));
+    showMessage("Signing out…", false);
+    doSignOut();
     return;
   }
 
   const wire = (id, kind) => {
     const btn = $(id);
+    if (!btn) return;
     if (providers.includes(kind)) {
       btn.hidden = false;
-      if (!btn._wired) {
-        btn.addEventListener("click", () => signIn(kind));
-        btn._wired = true;
-      }
+      if (!btn._wired) { btn.addEventListener("click", () => signIn(kind)); btn._wired = true; }
     } else {
       btn.hidden = true;
     }
   };
-  // Google and GitHub both sign in AND create the account on first use, so
-  // they cover login and sign-up. (Email is intentionally not offered here.)
   wire("btn-google", "google");
   wire("btn-github", "github");
 
@@ -159,9 +184,7 @@ function onRender(event) {
 
 window.addEventListener("message", onRender);
 window.addEventListener("resize", sendHeight);
-if (window.ResizeObserver) {
-  new ResizeObserver(sendHeight).observe(document.documentElement);
-}
+if (window.ResizeObserver) new ResizeObserver(sendHeight).observe(document.documentElement);
 
 ready();
 sendHeight();

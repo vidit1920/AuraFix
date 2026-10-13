@@ -248,18 +248,29 @@ def _render_login() -> None:
                 'First time here? Your account is created automatically.</div>',
                 unsafe_allow_html=True,
             )
-            result = firebase_login(auth.client_config(), auth.enabled_providers(), key="login")
+            signout = st.session_state.get("_pending_signout", False)
+            persist = False
+            if not signout:
+                persist = st.checkbox(f"Keep me signed in for {auth.session_max_days()} days",
+                                      value=False, key="stay_signed_in")
+            result = firebase_login(auth.client_config(), auth.enabled_providers(),
+                                    persist=persist, signout=signout, key="login")
             if result and isinstance(result, dict):
                 nonce = result.get("nonce")
                 if nonce and nonce != st.session_state.get("_consumed_nonce"):
                     st.session_state["_consumed_nonce"] = nonce
-                    try:
-                        claims = auth.verify_token(result.get("idToken", ""))
-                    except auth.AuthError as e:
-                        st.error(str(e))
-                        return
-                    st.session_state["auth_user"] = claims
-                    st.rerun()
+                    if result.get("signedOut"):
+                        st.session_state.pop("_pending_signout", None)
+                        st.session_state.pop("auth_user", None)
+                        st.rerun()
+                    else:
+                        try:
+                            claims = auth.verify_token(result.get("idToken", ""))
+                        except auth.AuthError as e:
+                            st.error(str(e))
+                            return
+                        st.session_state["auth_user"] = claims
+                        st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown(
@@ -304,6 +315,10 @@ def _render_sidebar() -> dict:
         who = user.get("name") or user.get("email") or "Signed in"
         st.caption(f"Signed in as {who}")
         if auth.auth_enabled() and st.button("Sign out", use_container_width=True):
+            # Drop the local session and ask the sign-in component to also clear
+            # Firebase's persisted session, so "keep me signed in" doesn't just
+            # log the user straight back in.
+            st.session_state["_pending_signout"] = True
             for k in ("auth_user", "_consumed_nonce", "result", "pr_created", "chat"):
                 st.session_state.pop(k, None)
             st.rerun()
