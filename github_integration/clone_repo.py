@@ -50,10 +50,12 @@ def clone_repo(url: str, depth: int = 1, dest: str | None = None) -> dict:
     target_dir = dest or tempfile.mkdtemp(prefix="aurafix_repo_")
 
     # If a token is present, embed it so a private clone authenticates
-    # without prompting. Public clones work fine without it.
+    # without prompting. Public clones work fine without it. The token is the
+    # signed-in user's own (per-session), falling back to the environment.
+    from github_integration.credentials import get_github_token
     clone_url = url
-    token = os.environ.get("GITHUB_TOKEN")
-    if token and token != "your-github-token-here" and url.startswith("https://github.com/"):
+    token = get_github_token()
+    if token and url.startswith("https://github.com/"):
         clone_url = url.replace("https://", f"https://{token}@", 1)
 
     try:

@@ -12,11 +12,11 @@ functions/methods defined, the line each starts on, and the names it calls —
 so the Code Navigation Agent and Root Cause Agent treat every language
 identically.
 
-NOTE on the binding: tree-sitter-language-pack's compiled nodes expose their
-accessors as *methods* (`node.kind()`, `node.child_count()`, `node.child(i)`,
-`node.start_byte()`) and the parser takes `str`, not `bytes`. That's
-non-standard versus py-tree-sitter, so all access goes through the small
-helpers below rather than the usual `.type` / `.children` attributes.
+NOTE on the binding: tree-sitter-language-pack exposes standard py-tree-sitter
+nodes — accessors are *attributes* (`node.type`, `node.children`,
+`node.start_byte`, `tree.root_node`) and the parser takes `bytes`, not `str`.
+All node access still goes through the small helpers below so the rest of the
+file reads uniformly and a future binding change is a one-line edit here.
 
 Scope is deliberately per-file (functions + the calls inside them), not full
 cross-file call resolution — same depth as the Python path for non-imported
@@ -64,9 +64,9 @@ def _get_parser(lang: str):
     return _parsers[lang]
 
 
-# --- node helpers (this binding exposes everything as methods) ---
+# --- node helpers (standard py-tree-sitter: everything is an attribute) ---
 def _kids(n):
-    return [n.child(i) for i in range(n.child_count())]
+    return n.children
 
 
 def _walk(n):
@@ -76,11 +76,11 @@ def _walk(n):
 
 
 def _text(n, src_bytes: bytes) -> str:
-    return src_bytes[n.start_byte():n.end_byte()].decode("utf-8", "replace")
+    return src_bytes[n.start_byte:n.end_byte].decode("utf-8", "replace")
 
 
 def _line(n, src_bytes: bytes) -> int:
-    return src_bytes[:n.start_byte()].count(b"\n") + 1
+    return src_bytes[:n.start_byte].count(b"\n") + 1
 
 
 def _def_name(node, src_bytes: bytes) -> str:
@@ -93,12 +93,12 @@ def _def_name(node, src_bytes: bytes) -> str:
     decl = node.child_by_field_name("declarator")
     seen = 0
     while decl is not None and seen < 6:
-        if decl.kind() in _IDENT_KINDS:
+        if decl.type in _IDENT_KINDS:
             return _text(decl, src_bytes)
         decl = decl.child_by_field_name("declarator")
         seen += 1
     for d in _walk(node):
-        if d.kind() in _IDENT_KINDS:
+        if d.type in _IDENT_KINDS:
             return _text(d, src_bytes)
     return "<anonymous>"
 
@@ -110,7 +110,7 @@ def _call_name(node, src_bytes: bytes) -> str:
     fn = node.child_by_field_name("function") or node.child_by_field_name("name") or node
     last = None
     for d in _walk(fn):
-        if d.kind() in _IDENT_KINDS:
+        if d.type in _IDENT_KINDS:
             last = d
     return _text(last, src_bytes) if last is not None else "<call>"
 
@@ -134,14 +134,14 @@ def extract_structure(source: str, lang: str) -> dict:
     try:
         parser = _get_parser(lang)
         src_bytes = source.encode("utf-8")
-        root = parser.parse(source).root_node()
+        root = parser.parse(src_bytes).root_node
     except Exception:
         return None
 
     functions: dict = {}
     for node in _walk(root):
-        if node.kind() in def_kinds:
-            calls = [_call_name(c, src_bytes) for c in _walk(node) if c.kind() in call_kinds]
+        if node.type in def_kinds:
+            calls = [_call_name(c, src_bytes) for c in _walk(node) if c.type in call_kinds]
             name = _def_name(node, src_bytes)
             # If the same name appears twice (overloads), keep the first; the
             # exact line matters less than having the symbol present.

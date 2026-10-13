@@ -1,159 +1,117 @@
 """
-Thin wrapper around the Gemini API.
+Thin, provider-agnostic wrapper around whatever LLM the current request is
+configured to use.
 
-Every agent in this project imports `call_llm` from here instead of
-constructing its own client. That gives us one place to:
-  - swap models (flash vs flash-lite) per call
-  - add retry/backoff for free-tier rate limits
-  - enforce JSON-only output when we need structured data
-  - log/debug every prompt sent during development
+Every agent imports ``call_llm`` / ``call_llm_json`` from here instead of
+talking to a vendor SDK directly. That gives us one place to:
+  - route to the active provider (Gemini / OpenAI / Anthropic / any
+    OpenAI-compatible endpoint) based on the per-session settings in
+    ``agents.runtime`` — this is what makes "bring your own key" work;
+  - enforce JSON-only output when we need structured data;
+  - keep retry/backoff for transient rate-limit / server errors in one spot.
 
-Nothing else in the codebase should import google.genai directly.
+The actual network calls live in ``agents.providers``; the credentials and
+model choice live in ``agents.runtime``. Nothing here reads an API key at
+import time, so the app boots fine with no key configured and only needs one
+when a user actually runs the pipeline.
 """
 
-import os
-import time
+from __future__ import annotations
+
 import json
-import httpx
-from google import genai
-from google.genai import types
-from dotenv import load_dotenv
 
-load_dotenv()
+from agents import providers
+from agents.runtime import get_settings
 
-API_KEY = os.environ.get("GEMINI_API_KEY")
-DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
-if not API_KEY or API_KEY == "your-key-here":
-    raise RuntimeError(
-        "GEMINI_API_KEY is not set. Copy .env.example to .env and add your "
-        "free key from https://aistudio.google.com/apikey"
-    )
-
-_client = genai.Client(api_key=API_KEY)
+def _scrub(text: str, *secrets: str) -> str:
+    """Remove any API-key values from a string before it can be shown or
+    logged. Defence in depth — providers already avoid echoing keys, but a
+    stray vendor error could include one."""
+    for s in secrets:
+        if s:
+            text = text.replace(s, "***")
+    return text
 
 
 def call_llm(
     prompt: str,
     system_instruction: str | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     json_mode: bool = False,
     max_retries: int = 4,
 ) -> str:
     """
-    Send a prompt to Gemini and return the text response.
+    Send a prompt to the active provider and return the text response.
 
     Args:
         prompt: the user-facing prompt/content.
         system_instruction: optional system-level instruction (role, rules).
-        model: which Gemini model to use. Defaults to GEMINI_MODEL from .env.
-        json_mode: if True, asks the model to return raw JSON (no markdown
-                   fences) — use this for every agent that returns structured
-                   data, which is most of them.
-        max_retries: retries transient failures (429 rate limits, 503
-                     server overload, 500/504 errors) with exponential
-                     backoff (1s, 2s, 4s, 8s) instead of crashing. These
-                     happen periodically on the free tier, especially
-                     during peak load — they're not bugs in this code.
+        model: optional per-call model override. Defaults to the session's
+            configured model. Kept for callers that want a cheaper/faster
+            model for a specific step.
+        json_mode: if True, ask the model for raw JSON (no markdown fences).
+        max_retries: transient-failure retries with exponential backoff.
 
     Returns:
-        The model's text output as a string. If json_mode=True, this is a
-        JSON string you still need to json.loads() yourself — kept explicit
-        on purpose so callers handle parse errors deliberately.
+        The model's text output. With json_mode=True this is still a JSON
+        *string* the caller must json.loads() — kept explicit so callers
+        handle parse errors deliberately (see call_llm_json).
     """
-    config_kwargs = {}
-    if system_instruction:
-        config_kwargs["system_instruction"] = system_instruction
-    if json_mode:
-        config_kwargs["response_mime_type"] = "application/json"
+    settings = get_settings()
+    if model:
+        from dataclasses import replace
+        settings = replace(settings, chat_model=model)
 
-    config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
-
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            response = _client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=config,
-            )
-            return response.text
-        except Exception as e:
-            last_error = e
-            error_str = str(e)
-
-            # Network-level transient failures: the request never got a
-            # response at all (timeout, connection drop, DNS hiccup).
-            # These have no HTTP status code to pattern-match on, so we
-            # check the exception type directly. A timeout is never "your
-            # request was malformed" — it's always worth retrying.
-            is_network_transient = isinstance(
-                e, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.NetworkError)
-            )
-
-            # Retry on transient failures: 429 (rate limit), 503
-            # (server overloaded/unavailable), 500 (internal error),
-            # 504 (gateway timeout). These are Google's infrastructure
-            # having a temporary issue, not a problem with our request,
-            # so retrying with backoff is the right response.
-            #
-            # Deliberately NOT retrying on 400 (bad request) or 401/403
-            # (auth) — those are real errors that won't fix themselves,
-            # and retrying them just delays a failure that's going to
-            # happen anyway.
-            is_transient = is_network_transient or any(
-                code in error_str
-                for code in ["429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500", "INTERNAL", "504"]
-            )
-            if is_transient and attempt < max_retries - 1:
-                wait = 2 ** attempt  # 1s, 2s, 4s
-                print(f"[llm_client] transient error ({error_str[:80]}...), retrying in {wait}s...")
-                time.sleep(wait)
-                continue
-            raise
-
-    raise last_error
+    try:
+        return providers.chat(settings, prompt, system_instruction, json_mode, max_retries=max_retries)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(_scrub(str(e), settings.chat_api_key, settings.embed_api_key)) from None
 
 
 def call_llm_json(
     prompt: str,
     system_instruction: str | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     max_json_retries: int = 2,
 ) -> dict:
     """
-    Convenience wrapper for the common case: call the LLM and parse JSON back.
+    Call the LLM and parse a JSON object back.
 
-    Occasionally a model produces malformed JSON even with
-    response_mime_type="application/json" set — usually because a
-    free-form text field (like a `reasoning` array) contains an
-    unescaped quote or control character that breaks JSON structure.
-    This is typically a one-off generation glitch, not a systematic
-    problem, so retrying the generation itself (not just re-parsing
-    the same broken text) is the right response — a fresh attempt
-    usually produces valid JSON.
+    Even with JSON mode on, a model can occasionally emit malformed JSON
+    (an unescaped quote in a free-text field) or, on providers without a
+    native JSON mode, wrap the object in ``` fences. We strip fences and, if
+    parsing still fails, regenerate (a fresh attempt usually fixes a one-off
+    glitch) before giving up.
 
-    Raises json.JSONDecodeError if every attempt fails — callers
-    should catch this rather than have it fail silently, since it can
-    also indicate a genuine, persistent problem with the prompt.
+    Raises json.JSONDecodeError if every attempt fails, so callers can tell a
+    transient glitch apart from a persistently bad prompt.
     """
-    last_error = None
-    last_raw = None
+    last_error: json.JSONDecodeError | None = None
+    last_raw = ""
 
     for attempt in range(max_json_retries + 1):
         raw = call_llm(prompt, system_instruction=system_instruction, model=model, json_mode=True)
         last_raw = raw
         try:
-            return json.loads(raw)
+            return json.loads(_strip_code_fences(raw))
         except json.JSONDecodeError as e:
             last_error = e
             if attempt < max_json_retries:
-                print(f"[llm_client] model returned malformed JSON ({e}), retrying generation...")
                 continue
 
-    # Every attempt failed — print a bounded preview of the last raw
-    # output so the failure is debuggable rather than just "bad JSON",
-    # without dumping a potentially huge response to the console.
     preview = (last_raw or "")[:500]
-    print(f"[llm_client] giving up after {max_json_retries + 1} attempts. Last raw output (first 500 chars):\n{preview}")
+    print(f"[llm_client] giving up after {max_json_retries + 1} attempts. "
+          f"Last raw output (first 500 chars):\n{preview}")
     raise last_error
+
+
+def _strip_code_fences(text: str) -> str:
+    """Remove a leading/trailing ```json … ``` fence if a provider added one
+    despite being asked for raw JSON."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[-1] if "\n" in t else t[3:]
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
+    return t.strip()

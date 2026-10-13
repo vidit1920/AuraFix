@@ -19,7 +19,14 @@ import hashlib
 import chromadb
 from rag.chunker import chunk_repository
 from rag.embeddings import embed_batch, embed_text
+from agents.runtime import get_settings
 
+# ChromaDB runs here strictly as an in-process, embedded library against a
+# local directory — never the client/server mode that the 2026 ChromaDB CVEs
+# (auth bypass / cross-tenant access / trust_remote_code RCE) apply to. The
+# directory is outside the web root and is never served. Default to the
+# system temp dir on a hosted box (a read-only or ephemeral project dir is
+# common) unless CHROMA_PERSIST_DIR overrides it.
 CHROMA_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "./chroma_db")
 
 _chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
@@ -27,13 +34,24 @@ _chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
 EMBED_BATCH_SIZE = 20  # keep batches small and predictable for free-tier limits
 
 
+def _embed_tag() -> str:
+    """A short, stable tag for the active embedding backend+model. It MUST be
+    part of the collection name: vectors from, say, a 384-dim local model and
+    a 3072-dim Gemini model are not comparable, so a cache built with one
+    embedder must never be queried with another."""
+    r = get_settings().resolved_embedding()
+    raw = f"{r.provider}:{r.model}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:8]
+
+
 def _collection_name(repo_id: str, commit_hash: str) -> str:
     """
     ChromaDB collection names have character restrictions, so we hash
-    the repo_id + commit_hash into a safe fixed-length name rather than
-    using the raw repo URL (which contains slashes/colons).
+    the repo_id + commit_hash (+ the embedding backend) into a safe
+    fixed-length name rather than using the raw repo URL (which contains
+    slashes/colons).
     """
-    raw = f"{repo_id}:{commit_hash}"
+    raw = f"{repo_id}:{commit_hash}:{_embed_tag()}"
     digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
     return f"repo_{digest}"
 

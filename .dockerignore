@@ -1,13 +1,31 @@
+# Virtualenvs and caches
 venv/
 .venv/
 chroma_db/
 __pycache__/
 *.pyc
-.git/
-.env
 .pytest_cache/
+node_modules/
+*.log
+
+# VCS / tooling
+.git/
+.github/
+.claude/
 sample-repo/.git/
 sample-shop/.git/
 sample-java/.git/
-node_modules/
-*.log
+sample-java/target/
+
+# Secrets — never copy any of these into the image. Provide them at runtime
+# as environment variables / mounted secrets instead.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*service*account*.json
+*serviceaccount*.json
+firebase-*.json
+.streamlit/secrets.toml
+secrets/

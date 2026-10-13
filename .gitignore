@@ -1,5 +1,15 @@
 # Secrets — NEVER commit these
 .env
+.env.*
+!.env.example
+# Firebase service account + any key/cert material
+*service*account*.json
+*serviceaccount*.json
+firebase-*.json
+*.pem
+*.key
+.streamlit/secrets.toml
+secrets/
 
 # Python
 __pycache__/

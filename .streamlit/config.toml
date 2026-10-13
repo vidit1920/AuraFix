@@ -1,12 +1,33 @@
-# AuraFix dashboard theme — dark, modern, violet accent. Tuned for a clean
-# professional look suitable for hosting and screenshots.
+# AuraFix theme + runtime config.
+#
+# Theme: muted dark, a single restrained accent, flat. No gradients, glass,
+# neon, pure black/white, or soft (large) corner radii.
 [theme]
 base = "dark"
-primaryColor = "#3b82f6"
-backgroundColor = "#0b0e16"
-secondaryBackgroundColor = "#141927"
-textColor = "#e7e9f0"
-font = "sans serif"
+primaryColor = "#5b8def"          # restrained steel blue (the one accent)
+backgroundColor = "#14161b"       # soft charcoal, not pure black
+secondaryBackgroundColor = "#1b1e26"
+textColor = "#e6e8ee"
+borderColor = "#2a2e39"
+showWidgetBorder = true
+baseRadius = "0.25rem"            # crisp corners, not pill-soft
+font = "sans-serif"               # system sans; not Inter/Geist/Space Grotesk
+
+[server]
+headless = true
+enableCORS = true                 # reject cross-origin requests
+enableXsrfProtection = true       # CSRF protection on form posts
+enableStaticServing = false       # do not serve arbitrary files from the app dir
+maxUploadSize = 5                 # MB; the app takes no large uploads
+fileWatcherType = "none"          # no hot-reload in production
+runOnSave = false
 
 [browser]
 gatherUsageStats = false
+
+[client]
+showErrorDetails = "none"         # debug OFF: never show tracebacks to users
+toolbarMode = "minimal"
+
+[logger]
+level = "info"
