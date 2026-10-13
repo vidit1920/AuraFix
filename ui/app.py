@@ -641,36 +641,6 @@ def _render_chat(final: dict) -> None:
 
 
 # --------------------------------------------------------------------------
-# About
-# --------------------------------------------------------------------------
-ABOUT_MD = """\
-AuraFix turns a plain-English bug report into a validated fix and a pull request,
-autonomously, with a human in the loop at review time.
-
-**The pipeline (orchestrated with LangGraph):**
-
-1. Issue understanding: parses your report into structured fields.
-2. Repository indexing (RAG): embeds the repo and retrieves the most relevant code.
-3. Code navigation: builds a call graph to trace the real execution path.
-4. Root-cause analysis: weighs the evidence into one diagnosis with a confidence score.
-5. Patch generation: writes a minimal diff that fixes the root cause.
-6. Validation: applies the patch and runs the tests, retrying with the error context, then escalates if it cannot fix it.
-7. Pull request: commits on a branch and opens a PR (forking if you lack push access).
-
-**Supported languages** (structural navigation and test validation):
-
-| Language | Navigation | Test validation |
-|----------|------------|-----------------|
-| Python | ast (full fidelity) | pytest |
-| Java | tree-sitter | Maven / Gradle |
-| C / C++ | tree-sitter | CMake + CTest / make test |
-| C# | tree-sitter | dotnet test |
-
-Every fix is AI-generated. Review it before merging and keep PRs as drafts until you have checked them.
-"""
-
-
-# --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 def _render_credit() -> None:
@@ -699,27 +669,10 @@ def main() -> None:
     options = _render_sidebar()
     have_key = _apply_session_credentials(options["provider_label"])
 
-    # Hero
+    # Heading
     st.markdown(
         '<div class="af-kicker">Autonomous AI Agent</div>'
-        '<div class="af-title">AuraFix</div>'
-        '<p class="af-sub">Describe a bug in plain English. A pipeline of AI agents investigates the '
-        'repository, pinpoints the root cause, writes a minimal fix, proves it with tests, and opens a '
-        'pull request.</p>'
-        '<div class="af-langs">Supported languages: Python, Java, C, C++, C#.</div>',
-        unsafe_allow_html=True,
-    )
-
-    # How it works (numbered list, not three cards in a row)
-    st.markdown(
-        '<ol class="af-steps">'
-        '<li><span class="n">1</span><span><span class="t">Point it at a repo.</span> '
-        '<span class="d">The bundled sample or any public GitHub URL.</span></span></li>'
-        '<li><span class="n">2</span><span><span class="t">Describe the bug.</span> '
-        '<span class="d">Plain English. Add a stack trace for extra accuracy.</span></span></li>'
-        '<li><span class="n">3</span><span><span class="t">Review and open a PR.</span> '
-        '<span class="d">See the diagnosis and fix, then open a pull request.</span></span></li>'
-        '</ol>',
+        '<div class="af-title">AuraFix</div>',
         unsafe_allow_html=True,
     )
     st.write("")
@@ -777,13 +730,6 @@ def main() -> None:
         _render_pr_section(final)
         _render_chat(final)
         _render_timeline(final)
-    else:
-        st.caption("Results will appear here after you run AuraFix.")
-
-    st.markdown("---")
-    with st.expander("About AuraFix"):
-        st.markdown(ABOUT_MD)
-    st.caption("AuraFix. Every fix is AI-generated; review before merging.")
 
 
 def _handle_run(source, sample, repo_path_input, repo_url_input, bug_report,
