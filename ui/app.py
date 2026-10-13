@@ -159,6 +159,22 @@ CSS = """
 .af-note {color: #8c93a0; font-size: .82rem;}
 a {color: #5b8def;}
 hr {border-color: #242833;}
+
+/* Sign-in screen */
+.af-auth-brand {text-align: center; margin: 7vh 0 20px 0;}
+.af-logo-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 46px; height: 46px; border-radius: 11px; margin-bottom: 14px;
+    background: rgba(91,141,239,0.12); border: 1px solid rgba(91,141,239,0.45);
+    color: #7aa4f2; font-weight: 700; font-size: 1.3rem;
+}
+.af-logo-word {font-size: 1.7rem; font-weight: 700; color: #eef0f4; letter-spacing: -.01em; line-height: 1;}
+.af-auth-tag {color: #9aa0ac; font-size: .95rem; margin-top: 8px;}
+.af-auth-head {font-size: 1.12rem; font-weight: 600; color: #e6e8ee; text-align: center; margin: 2px 0 4px;}
+.af-auth-sub {color: #9aa0ac; font-size: .87rem; text-align: center; margin: 0 auto 16px; max-width: 300px; line-height: 1.45;}
+.af-auth-foot {text-align: center; color: #7b818d; font-size: .78rem; margin-top: 16px; line-height: 1.5;}
+/* Tighten the sign-in card so the buttons aren't lost in empty space */
+.af-auth-card [data-testid="stVerticalBlockBorderWrapper"] {max-width: 360px; margin: 0 auto;}
 </style>
 """
 
@@ -212,29 +228,45 @@ def _current_user() -> dict | None:
 
 
 def _render_login() -> None:
-    st.markdown('<div class="af-kicker">Autonomous AI Agent</div>'
-                '<div class="af-title">AuraFix</div>'
-                '<p class="af-sub">Sign in to run the autonomous bug-fixing pipeline. '
-                'You bring your own model key; nothing is charged to a shared account.</p>',
-                unsafe_allow_html=True)
-    st.write("")
+    # Centered, single-column auth layout.
+    _, mid, _ = st.columns([1, 1.5, 1])
+    with mid:
+        st.markdown(
+            '<div class="af-auth-brand">'
+            '<div class="af-logo-badge">A</div>'
+            '<div class="af-logo-word">AuraFix</div>'
+            '<div class="af-auth-tag">Autonomous bug-fixing, from report to pull request.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
-    with st.container(border=True):
-        st.markdown('<div class="af-card-h">Sign in</div>', unsafe_allow_html=True)
-        result = firebase_login(auth.client_config(), auth.enabled_providers(), key="login")
-        if result and isinstance(result, dict):
-            nonce = result.get("nonce")
-            if nonce and nonce != st.session_state.get("_consumed_nonce"):
-                st.session_state["_consumed_nonce"] = nonce
-                try:
-                    claims = auth.verify_token(result.get("idToken", ""))
-                except auth.AuthError as e:
-                    st.error(str(e))
-                    return
-                st.session_state["auth_user"] = claims
-                st.rerun()
-        st.markdown('<p class="af-note">Sign-in is handled by Firebase. We receive only your '
-                    'basic profile (name, email) to identify your session.</p>', unsafe_allow_html=True)
+        st.markdown('<div class="af-auth-card">', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(
+                '<div class="af-auth-head">Sign in to continue</div>'
+                '<div class="af-auth-sub">Use your Google or GitHub account. '
+                'First time here? Your account is created automatically.</div>',
+                unsafe_allow_html=True,
+            )
+            result = firebase_login(auth.client_config(), auth.enabled_providers(), key="login")
+            if result and isinstance(result, dict):
+                nonce = result.get("nonce")
+                if nonce and nonce != st.session_state.get("_consumed_nonce"):
+                    st.session_state["_consumed_nonce"] = nonce
+                    try:
+                        claims = auth.verify_token(result.get("idToken", ""))
+                    except auth.AuthError as e:
+                        st.error(str(e))
+                        return
+                    st.session_state["auth_user"] = claims
+                    st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown(
+            '<div class="af-auth-foot">Secured by Firebase. We only receive your name and '
+            'email to identify your session. Your model key is never shared.</div>',
+            unsafe_allow_html=True,
+        )
 
 
 def _require_auth() -> bool:

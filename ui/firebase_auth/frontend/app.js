@@ -76,7 +76,9 @@ function ensureFirebase(config) {
 async function signIn(kind) {
   if (busy || !auth) return;
   setBusy(true);
-  showMessage("Opening sign-in window…", false);
+  msg.className = "msg";
+  msg.innerHTML = '<span class="spin"></span>Opening sign-in window…';
+  sendHeight();
   try {
     let provider;
     if (kind === "google") {
@@ -146,11 +148,10 @@ function onRender(event) {
       btn.hidden = true;
     }
   };
+  // Google and GitHub both sign in AND create the account on first use, so
+  // they cover login and sign-up. (Email is intentionally not offered here.)
   wire("btn-google", "google");
   wire("btn-github", "github");
-  // Email sign-in is not wired in this minimal component; google/github cover
-  // the requested flows. The button stays hidden unless explicitly enabled.
-  $("btn-email").hidden = true;
 
   if (!msg.textContent) showMessage("", false);
   sendHeight();
