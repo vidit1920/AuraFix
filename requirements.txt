@@ -1,13 +1,46 @@
-google-genai>=0.3.0
-python-dotenv>=1.0.0
-pydantic>=2.6.0
-langgraph>=0.2.0
-tree-sitter-language-pack>=0.1.0
-chromadb>=0.5.0
-langchain-text-splitters>=0.2.0
-GitPython>=3.1.40
-pytest>=8.0.0
-pytest-json-report>=1.5.0
-flake8>=7.0.0
-PyGithub>=2.3.0
-streamlit>=1.36.0
+# AuraFix dependencies — pinned for reproducible, security-patched deploys.
+# Regenerate floors with: pip-audit --path <site-packages>
+
+# Web UI + ASGI launcher
+streamlit==1.65.0
+
+# LLM providers (chat via google-genai + httpx; httpx also covers OpenAI /
+# Anthropic / OpenAI-compatible endpoints, so no extra vendor SDKs)
+google-genai==2.29.0
+httpx==0.28.1
+
+# Orchestration + validation
+langgraph==1.2.14
+pydantic==2.14.1
+
+# Code navigation (multi-language) + RAG
+tree-sitter==0.25.2
+tree-sitter-language-pack==1.22.1
+chromadb==1.5.9
+langchain-text-splitters==1.1.3
+
+# Git + GitHub (GitPython >=3.1.60 fixes 2026 argument/config injection CVEs)
+GitPython==3.2.0
+PyGithub==2.10.0
+
+# Authentication (Firebase ID-token verification, server side)
+firebase-admin==7.7.0
+
+# Config
+python-dotenv==1.2.4
+
+# Test runner used by the pipeline's validator (not just for our tests)
+pytest==9.1.1
+pytest-json-report==1.5.0
+
+# --- Security floors / resolver pins -------------------------------------
+# Transitive packages that had 2026 advisories or version conflicts; pinned so
+# a fresh build is both patched and internally consistent.
+urllib3>=2.8.0
+PyJWT>=2.15.1
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+opentelemetry-exporter-otlp-proto-common==1.45.1
+opentelemetry-exporter-otlp-proto-grpc==1.45.1
+opentelemetry-proto==1.45.1

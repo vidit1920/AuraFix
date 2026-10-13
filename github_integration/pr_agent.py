@@ -42,11 +42,10 @@ from github import Github, GithubException
 
 
 def _token() -> str | None:
-    """Returns a usable GITHUB_TOKEN, or None if it's missing/placeholder."""
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token or token == "your-github-token-here":
-        return None
-    return token
+    """Returns a usable GitHub token (the signed-in user's own per-session
+    token if set, else the GITHUB_TOKEN env var), or None if neither is set."""
+    from github_integration.credentials import get_github_token
+    return get_github_token()
 
 
 def _authenticated_remote_url(repo_full_name: str, token: str) -> str:
@@ -200,10 +199,10 @@ def create_pull_request(
     Returns:
         {"success": bool, "url": str | None, "error": str | None}
 
-    Requires GITHUB_TOKEN to be set in the environment.
+    Requires a GitHub token (per-session or GITHUB_TOKEN env var).
     """
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token or token == "your-github-token-here":
+    token = _token()
+    if not token:
         return {
             "success": False,
             "url": None,

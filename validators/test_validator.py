@@ -27,6 +27,46 @@ import shutil
 import subprocess
 
 
+def _sandbox_kwargs(cpu_seconds: int, limit_mem: bool = True) -> dict:
+    """Best-effort OS resource limits for running UNTRUSTED code (a cloned
+    repo's test suite, or a patched file). POSIX only; a no-op on Windows.
+
+    Caps CPU time, output file size, and process count, and starts a new
+    session so a run-away process group is cleaned up. An address-space cap is
+    applied only for the Python path, since JVM/.NET build tools reserve huge
+    virtual address ranges and would be killed by it.
+
+    This is defence in depth, layered on top of the non-root container, the
+    wall-clock timeouts, and the disabled local-path source. True multi-tenant
+    isolation (uid / network namespaces) belongs at the container/orchestrator
+    level."""
+    if os.name != "posix":
+        return {}
+
+    def _apply() -> None:
+        import resource
+        soft_cpu = max(1, cpu_seconds)
+        resource.setrlimit(resource.RLIMIT_CPU, (soft_cpu, soft_cpu + 15))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024 * 1024, 256 * 1024 * 1024))
+        for lim in ("RLIMIT_NPROC",):
+            try:
+                resource.setrlimit(getattr(resource, lim), (512, 512))
+            except (ValueError, OSError, AttributeError):
+                pass
+        if limit_mem:
+            mem = 4 * 1024 * 1024 * 1024  # 4 GiB virtual memory
+            try:
+                resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+            except (ValueError, OSError):
+                pass
+        try:
+            os.setsid()
+        except OSError:
+            pass
+
+    return {"preexec_fn": _apply}
+
+
 def find_matching_test_file(repo_path: str, source_file: str) -> str | None:
     """
     Guesses the test file corresponding to a source file, using the
@@ -99,6 +139,7 @@ def run_tests(repo_path: str, test_path: str = None, timeout: int = 120) -> dict
             capture_output=True,
             text=True,
             timeout=timeout,
+            **_sandbox_kwargs(timeout),
         )
     except subprocess.TimeoutExpired:
         return {
@@ -289,7 +330,8 @@ def _run_external_steps(repo_path: str, steps: list, language: str, timeout: int
     transcript = []
     for cmd in steps:
         try:
-            proc = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True, timeout=timeout)
+            proc = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True, timeout=timeout,
+                                   **_sandbox_kwargs(timeout, limit_mem=False))
         except subprocess.TimeoutExpired:
             return _external_fail(f"`{' '.join(cmd)}` timed out after {timeout}s.")
         except FileNotFoundError:

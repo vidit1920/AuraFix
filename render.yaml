@@ -1,0 +1,61 @@
+# Render Blueprint for AuraFix (https://render.com/docs/blueprint-spec).
+#
+# This documents the service so the deploy is reproducible. Secrets are marked
+# `sync: false`, which means their VALUES are NOT stored here (never commit real
+# keys) — Render prompts for them on first apply, or you set them in the
+# dashboard under the service's Environment tab.
+#
+# Applying this to an existing, manually-created service: Render matches by
+# `name`. If your current service is in a different region or plan, either
+# match those here or set these env vars directly in the dashboard instead.
+#
+# IMPORTANT: set the FIREBASE_* values BEFORE the new code deploys. With auth
+# enabled (the default) and no Firebase config, the app fails closed and nobody
+# can sign in. To launch without login for now, add AURAFIX_AUTH_DISABLED=true.
+
+services:
+  - type: web
+    name: aurafix
+    runtime: docker
+    plan: free
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /_stcore/health
+    autoDeploy: true
+    envVars:
+      # --- Non-secret defaults (safe to keep here) ---
+      - key: APP_ENV
+        value: production
+      - key: GEMINI_MODEL
+        value: gemini-flash-latest
+      - key: FIREBASE_PROVIDERS
+        value: google,github
+      - key: CHROMA_PERSIST_DIR
+        value: /tmp/aurafix_chroma
+
+      # --- Firebase public web config (per project; not secret, but set here) ---
+      - key: FIREBASE_API_KEY
+        sync: false
+      - key: FIREBASE_AUTH_DOMAIN
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_APP_ID
+        sync: false
+      - key: FIREBASE_MESSAGING_SENDER_ID
+        sync: false
+      - key: FIREBASE_STORAGE_BUCKET
+        sync: false
+
+      # --- Firebase service account: SECRET, server-side token verification ---
+      # Paste the service-account JSON as a single line (mark it secret).
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+
+      # --- Optional ---
+      # Comma-separated admin emails for admin-only features.
+      - key: AURAFIX_ADMIN_EMAILS
+        sync: false
+      # Pin the browser origin for CORS, e.g. https://aurafix.onrender.com
+      - key: STREAMLIT_SERVER_CORS_ALLOWED_ORIGINS
+        sync: false
