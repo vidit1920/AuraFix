@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import operator
 import subprocess
-from typing import Annotated, Any, Optional, TypedDict
+from typing import Annotated, Any, Literal, Optional, TypedDict
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -81,6 +81,12 @@ class BugFixRequest(BaseModel):
     max_retries: int = 3               # patch attempts before escalating to human review
     max_rag_results: int = 5           # cap retrieved chunks (token-budget guard)
 
+    # Retrieval (rag/agentic.py). "multi_agent" runs the LLM Query Planner and
+    # Relevance Critic around the three retrievers; "fast" runs the retrievers
+    # once with a rule-based plan and no extra LLM calls.
+    retrieval_mode: Literal["multi_agent", "fast"] = "multi_agent"
+    max_retrieval_rounds: int = Field(2, ge=1, le=3)  # critic may ask for follow-up searches
+
     @field_validator("bug_report", "repo_path")
     @classmethod
     def _not_blank(cls, v: str) -> str:
@@ -106,10 +112,19 @@ class GraphState(TypedDict, total=False):
     confidence_threshold: float
     max_retries: int
     max_rag_results: int
+    retrieval_mode: str
+    max_retrieval_rounds: int
 
     # ---- pipeline outputs (written as nodes run) ----
     issue: Optional[dict]                 # Issue Agent output
-    rag_chunks: Optional[list]            # RAG retrieval (Repository Indexing)
+    index_info: Optional[dict]            # {"chunks": int, "embedding": str}
+    retrieval_plan: Optional[dict]        # Query Planner output
+    retrieval_candidates: Optional[dict]  # fused candidates, accumulated across rounds
+    retrieval_round: int                  # retriever rounds run so far
+    retrieval_followups: list             # critic's follow-up searches for the next round
+    retrieval_needs_more: bool            # critic asked for another round
+    retrieval_trace: list                 # per-round summary for the explainability view
+    rag_chunks: Optional[list]            # final context chosen by the Relevance Critic
     call_graph_trace: Optional[dict]      # Code Navigation output
     root_cause: Optional[dict]            # Root Cause Agent output
 
@@ -198,8 +213,17 @@ def initial_state(request: BugFixRequest) -> GraphState:
         confidence_threshold=request.confidence_threshold,
         max_retries=request.max_retries,
         max_rag_results=request.max_rag_results,
+        retrieval_mode=request.retrieval_mode,
+        max_retrieval_rounds=request.max_retrieval_rounds,
         # outputs (not computed yet)
         issue=None,
+        index_info=None,
+        retrieval_plan=None,
+        retrieval_candidates=None,
+        retrieval_round=0,
+        retrieval_followups=[],
+        retrieval_needs_more=False,
+        retrieval_trace=[],
         rag_chunks=None,
         call_graph_trace=None,
         root_cause=None,

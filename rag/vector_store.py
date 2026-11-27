@@ -108,6 +108,17 @@ def get_or_build_collection(repo_path: str, repo_id: str, commit_hash: str):
     return collection
 
 
+def collection_chunks(collection) -> list[dict]:
+    """Every stored chunk (text + location), for retrievers that don't use
+    vectors (keyword / structural search). Works on cached collections too, so
+    the lexical index never needs the repo to be re-chunked."""
+    data = collection.get(include=["documents", "metadatas"])
+    out = []
+    for doc, meta in zip(data.get("documents") or [], data.get("metadatas") or []):
+        out.append({"text": doc, "filename": meta["filename"], "chunk_index": meta["chunk_index"]})
+    return out
+
+
 def query_collection(collection, query_text: str, n_results: int = 10) -> list[dict]:
     """
     Embeds query_text and retrieves the n_results most similar chunks.
@@ -116,6 +127,9 @@ def query_collection(collection, query_text: str, n_results: int = 10) -> list[d
         List of dicts: {"text": str, "filename": str, "chunk_index": int,
         "distance": float (lower = more similar)}
     """
+    n_results = min(n_results, collection.count())
+    if n_results <= 0:
+        return []
     query_vector = embed_text(query_text)
 
     results = collection.query(query_embeddings=[query_vector], n_results=n_results)

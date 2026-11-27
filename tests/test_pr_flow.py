@@ -166,3 +166,34 @@ def test_push_failure_reported(monkeypatch):
     assert "Push to" in result["error"]
     assert "ghp_faketoken123" not in result["error"]   # token scrubbed
     assert upstream.created_pulls == []                 # no PR attempted
+
+
+def test_web_session_never_falls_back_to_server_github_token(monkeypatch):
+    """Security regression: an empty token field in the web app must not
+    borrow the operator's GITHUB_TOKEN (that let any visitor clone the
+    operator's private repos). The CLI (no session bound) still may."""
+    import contextvars
+    from github_integration import credentials
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_operatorToken")
+
+    def web_session_without_token():
+        credentials.set_github_token("")
+        return credentials.get_github_token()
+
+    def web_session_with_token():
+        credentials.set_github_token("  ghp_userToken ")
+        return credentials.get_github_token()
+
+    assert contextvars.copy_context().run(web_session_without_token) is None
+    assert contextvars.copy_context().run(web_session_with_token) == "ghp_userToken"
+    assert contextvars.Context().run(credentials.get_github_token) == "ghp_operatorToken"
+
+
+def test_authenticated_url_uses_token_as_password():
+    """The token must be the password of x-access-token, not the username,
+    or git asks for a password and private clones / pushes fail."""
+    from github_integration.credentials import authenticated_github_url
+    from github_integration import pr_agent
+    assert authenticated_github_url("o/r", "T") == "https://x-access-token:T@github.com/o/r.git"
+    assert pr_agent._authenticated_remote_url("o/r", "T") == "https://x-access-token:T@github.com/o/r.git"

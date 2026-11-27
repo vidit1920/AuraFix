@@ -1,0 +1,10 @@
+{
+  "id": "java-palindrome",
+  "language": "Java",
+  "bug_report": "isPalindrome says 'Racecar' and 'A man, a plan, a canal: Panama' are not palindromes. The check should ignore capitalisation.",
+  "expected_files": [
+    "src/main/java/text/TextUtils.java"
+  ],
+  "expected_function": "isPalindrome",
+  "expected_status": "pr_ready"
+}

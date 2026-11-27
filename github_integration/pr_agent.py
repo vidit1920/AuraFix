@@ -38,6 +38,11 @@ PR opened by AuraFix.
 import os
 import time
 from git import Repo, GitCommandError
+
+from github_integration.credentials import NONINTERACTIVE_GIT_ENV
+
+# GitPython inherits the process environment: make sure git never prompts.
+os.environ.update(NONINTERACTIVE_GIT_ENV)
 from github import Github, GithubException
 
 
@@ -52,7 +57,8 @@ def _authenticated_remote_url(repo_full_name: str, token: str) -> str:
     """Builds an https remote URL with the token embedded so `git push`
     authenticates non-interactively (a headless run can't answer a
     username/password prompt)."""
-    return f"https://{token}@github.com/{repo_full_name}.git"
+    from github_integration.credentials import authenticated_github_url
+    return authenticated_github_url(repo_full_name, token)
 
 
 def create_branch_and_commit(

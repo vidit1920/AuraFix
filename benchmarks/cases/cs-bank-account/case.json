@@ -1,0 +1,10 @@
+{
+  "id": "cs-bank-account",
+  "language": "C#",
+  "bug_report": "Customers can withdraw more money than they have: an account holding 50 lets you withdraw 80 and the balance becomes -30.",
+  "expected_files": [
+    "src/Account.cs"
+  ],
+  "expected_function": "Withdraw",
+  "expected_status": "pr_ready"
+}

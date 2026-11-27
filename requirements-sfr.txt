@@ -1,0 +1,17 @@
+# Optional: the SFR-Embedding-Code-400M_R code search model (local, no key).
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-sfr.txt
+#
+# Needs about 2 GB of RAM while indexing and downloads ~870 MB of weights from
+# Hugging Face on first use. Too large for Render's free 512 MB instance, so it
+# is NOT in requirements.txt; without it the app falls back to the small local
+# all-MiniLM-L6-v2 model. The SFR weights are licensed CC-BY-NC-4.0
+# (research / non-commercial use only).
+#
+# The model's custom architecture code (Alibaba-NLP/new-impl) targets
+# transformers 4.x: transformers 5 removed APIs it calls
+# (get_extended_attention_mask), so stay on the 4.x / sentence-transformers 5.x line.
+torch>=2.6
+transformers>=4.51,<5
+sentence-transformers>=3.0,<6

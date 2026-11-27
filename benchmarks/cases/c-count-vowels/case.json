@@ -1,0 +1,10 @@
+{
+  "id": "c-count-vowels",
+  "language": "C",
+  "bug_report": "count_vowels ignores capital letters: count_vowels(\"AEIOU\") returns 0 and count_vowels(\"Apple Orange\") returns 3 instead of 5.",
+  "expected_files": [
+    "src/text.c"
+  ],
+  "expected_function": "count_vowels",
+  "expected_status": "pr_ready"
+}

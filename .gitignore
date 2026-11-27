@@ -38,3 +38,6 @@ sample-java/target/
 .idea/
 .claude/
 *.log
+
+# Benchmark run output (scorecards are uploaded by CI)
+benchmarks/results/

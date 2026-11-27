@@ -19,9 +19,42 @@ when a user actually runs the pipeline.
 from __future__ import annotations
 
 import json
+import re
 
 from agents import providers
 from agents.runtime import get_settings
+
+
+class ProviderError(RuntimeError):
+    """A model-provider failure with a plain-language, key-free message that
+    is safe to show users (bad key, quota, unknown model, overload)."""
+
+
+# (markers in the raw vendor error, message for the user). Checked in order.
+_FRIENDLY = [
+    (("API_KEY_INVALID", "API key not valid", "invalid x-api-key", "Incorrect API key", "401",
+      "key was rejected"),
+     "The API key was rejected. Check that it is correct and still active."),
+    (("RESOURCE_EXHAUSTED", "429", "rate limit", "quota"),
+     "This key has hit its rate limit or daily quota. Wait a little, or switch to another model or key."),
+    (("NOT_FOUND", "404", "is not found", "does not exist", "model not found"),
+     "The model was not found. Check the model name on the Setup page."),
+    (("PERMISSION_DENIED", "403", "access denied"),
+     "This key does not have access to that model."),
+    (("UNAVAILABLE", "503", "high demand", "overloaded", "529"),
+     "The model provider is overloaded right now. Try again in a minute."),
+]
+
+
+def friendly_error(raw: str) -> str | None:
+    low = (raw or "").lower()
+    for markers, message in _FRIENDLY:
+        for m in markers:
+            # Bare status codes must stand alone ("429", not "line 4291").
+            hit = re.search(rf"\b{m}\b", low) if m.isdigit() else m.lower() in low
+            if hit:
+                return message
+    return None
 
 
 def _scrub(text: str, *secrets: str) -> str:
@@ -66,7 +99,11 @@ def call_llm(
     try:
         return providers.chat(settings, prompt, system_instruction, json_mode, max_retries=max_retries)
     except Exception as e:  # noqa: BLE001
-        raise RuntimeError(_scrub(str(e), settings.chat_api_key, settings.embed_api_key)) from None
+        raw = _scrub(str(e), settings.chat_api_key, settings.embed_api_key)
+        message = friendly_error(raw)
+        if message:
+            raise ProviderError(message) from None
+        raise RuntimeError(raw[:500]) from None
 
 
 def call_llm_json(

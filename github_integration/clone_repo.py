@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -32,6 +33,21 @@ def parse_repo_full_name(url: str) -> str | None:
     """
     match = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?/?$", url.strip())
     return match.group(1) if match else None
+
+
+def _friendly_clone_error(err: str, had_token: bool) -> str:
+    """Turn git's stderr into something a user can act on."""
+    low = err.lower()
+    if any(m in low for m in ("repository not found", "could not read username", "could not read password",
+                              "authentication failed", "terminal prompts disabled", "403", "404")):
+        if had_token:
+            return ("Couldn't access this repository. Check the URL, and that your GitHub token "
+                    "can read it (for a private repository it needs the repo scope).")
+        return ("Couldn't access this repository. Check the URL. If it's private, add a GitHub "
+                "token on the Setup page that can read it, or make the repository public.")
+    if "could not resolve host" in low or "unable to access" in low:
+        return "Couldn't reach GitHub. Check the server's internet connection and try again."
+    return err or "git clone failed"
 
 
 def clone_repo(url: str, depth: int = 1, dest: str | None = None) -> dict:
@@ -52,22 +68,38 @@ def clone_repo(url: str, depth: int = 1, dest: str | None = None) -> dict:
     # If a token is present, embed it so a private clone authenticates
     # without prompting. Public clones work fine without it. The token is the
     # signed-in user's own (per-session), falling back to the environment.
-    from github_integration.credentials import get_github_token
+    from github_integration.credentials import authenticated_github_url, get_github_token, git_env
     clone_url = url
     token = get_github_token()
-    if token and url.startswith("https://github.com/"):
-        clone_url = url.replace("https://", f"https://{token}@", 1)
+    if token and repo_full_name and url.startswith("https://github.com/"):
+        clone_url = authenticated_github_url(repo_full_name, token)
 
     try:
         result = subprocess.run(
-            ["git", "clone", "--depth", str(depth), clone_url, target_dir],
+            # credential.helper= : no stored credentials or login pop-ups; the
+            # only auth is the token above (public repos need none).
+            ["git", "-c", "credential.helper=", "clone", "--depth", str(depth), clone_url, target_dir],
             capture_output=True,
             text=True,
             timeout=180,
+            env=git_env(),
         )
     except subprocess.TimeoutExpired:
         return {"success": False, "repo_path": None, "repo_full_name": repo_full_name,
                 "error": "git clone timed out after 180s"}
+
+    if result.returncode != 0 and token and clone_url != url:
+        # A wrong or expired token makes GitHub reject even a public repo that
+        # needs no auth at all, so retry once anonymously before giving up.
+        shutil.rmtree(target_dir, ignore_errors=True)
+        os.makedirs(target_dir, exist_ok=True)
+        anon = subprocess.run(
+            ["git", "-c", "credential.helper=", "clone", "--depth", str(depth), url, target_dir],
+            capture_output=True, text=True, timeout=180, env=git_env(),
+        )
+        if anon.returncode == 0:
+            return {"success": True, "repo_path": target_dir, "repo_full_name": repo_full_name,
+                    "error": None}
 
     if result.returncode != 0:
         # Scrub the token out of any error text before surfacing it.
@@ -75,7 +107,7 @@ def clone_repo(url: str, depth: int = 1, dest: str | None = None) -> dict:
         if token:
             err = err.replace(token, "***")
         return {"success": False, "repo_path": None, "repo_full_name": repo_full_name,
-                "error": err or "git clone failed"}
+                "error": _friendly_clone_error(err, bool(token))}
 
     return {"success": True, "repo_path": target_dir, "repo_full_name": repo_full_name, "error": None}
 

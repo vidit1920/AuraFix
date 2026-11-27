@@ -73,6 +73,8 @@ def embed(resolution: EmbedResolution, texts: list[str]) -> list[list[float]]:
     """Embed a batch of texts with the resolved embedding backend."""
     if resolution.provider == "local":
         return _local_embed(texts)
+    if resolution.provider == "sfr":
+        return _sfr_embed(texts)
     if resolution.provider == "gemini":
         return _gemini_embed(resolution, texts)
     if resolution.provider == "openai":
@@ -247,6 +249,78 @@ def _local_embed(texts: list[str]) -> list[list[float]]:
     vectors = _local_ef(texts)
     # The ONNX model yields numpy float32 scalars; ChromaDB (and downstream
     # JSON) want plain Python floats, so cast explicitly.
+    return [[float(x) for x in v] for v in vectors]
+
+
+# --------------------------------------------------------------------------
+# SFR-Embedding-Code-400M_R (local code-retrieval model, no key)
+# --------------------------------------------------------------------------
+# The model ships custom architecture code (trust_remote_code), which lives in
+# a second repo (Alibaba-NLP/new-impl). Both are pinned to exact commits so the
+# code that runs here can never change underneath us.
+_SFR_REVISION = "cb950dc80d677c6fdc00f56c8ddd20ca2642c59e"
+_SFR_CODE_REVISION = "40ced75c3017eb27626c9d4ea981bde21a2662f4"
+# Chunks are ~800 characters (~250 tokens); 1024 tokens leaves headroom while
+# keeping CPU memory far below the model's 8192-token maximum.
+_SFR_MAX_SEQ = 1024
+_sfr_model = None
+
+
+def _sfr_load():
+    global _sfr_model
+    if _sfr_model is None:
+        from agents.runtime import SFR_MODEL_ID, sfr_available
+        if not sfr_available():
+            raise LLMError(
+                "The SFR code embedding model needs extra packages. Install them with "
+                "`pip install -r requirements-sfr.txt`, or choose another embedding option."
+            )
+        import torch
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer(
+            SFR_MODEL_ID,
+            revision=_SFR_REVISION,
+            trust_remote_code=True,
+            device="cpu",
+            config_kwargs={"code_revision": _SFR_CODE_REVISION},
+            # float32: the checkpoint is bf16, which is far slower on most CPUs.
+            model_kwargs={"code_revision": _SFR_CODE_REVISION, "dtype": torch.float32},
+        )
+        model.max_seq_length = _SFR_MAX_SEQ
+        _sfr_rebuild_buffers(model)
+        _sfr_model = model
+    return _sfr_model
+
+
+def _sfr_rebuild_buffers(model) -> None:
+    """Recompute the model's non-persistent buffers.
+
+    transformers 5.x builds models on the meta device and only materialises
+    weights from the checkpoint, so buffers the custom architecture computes
+    in __init__ (position_ids, rotary inv_freq and its cos/sin cache) are left
+    as uninitialised memory. Without this the first encode() fails with an
+    out-of-bounds index, or silently yields garbage vectors. These are the same
+    formulas the model's own __init__ uses (Alibaba-NLP/new-impl modeling.py)."""
+    import torch
+    for m in model.modules():
+        if type(m).__name__.endswith("RotaryEmbedding") and hasattr(m, "_set_cos_sin_cache"):
+            inv_freq = 1.0 / (m.base ** (torch.arange(0, m.dim, 2, dtype=torch.float32) / m.dim))
+            m.register_buffer("inv_freq", inv_freq, persistent=False)
+            seq = m.max_position_embeddings
+            if getattr(m, "scaling_factor", None):  # NTK-scaled variant
+                seq = m.max_position_embeddings * m.scaling_factor
+            m._set_cos_sin_cache(seq, inv_freq.device, torch.float32)
+        pos = getattr(m, "position_ids", None)
+        if isinstance(pos, torch.Tensor) and pos.dim() == 1:
+            m.register_buffer("position_ids", torch.arange(pos.size(0)), persistent=False)
+
+
+def _sfr_embed(texts: list[str]) -> list[list[float]]:
+    """Embed with SFR-Embedding-Code (CLS pooling, L2-normalised, 1024-dim).
+    The model card uses no query/document prefix, so both are encoded as-is.
+    Downloaded (~870 MB) and cached by Hugging Face on first use."""
+    vectors = _sfr_load().encode(texts, batch_size=8, normalize_embeddings=True,
+                                 convert_to_numpy=True, show_progress_bar=False)
     return [[float(x) for x in v] for v in vectors]
 
 

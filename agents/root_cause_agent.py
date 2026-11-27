@@ -96,10 +96,17 @@ def _format_rag_section(rag_chunks: list | None) -> str:
 
     lines = []
     for chunk in rag_chunks:
-        lines.append(
-            f"--- {chunk['filename']} [chunk {chunk['chunk_index']}] "
-            f"(similarity distance: {chunk['distance']:.4f}) ---\n{chunk['text']}"
-        )
+        # Chunks from the multi-agent retriever carry provenance; chunks found
+        # only by keyword/structural search have no vector distance.
+        meta = []
+        if isinstance(chunk.get("distance"), (int, float)):
+            meta.append(f"similarity distance: {chunk['distance']:.4f}")
+        if chunk.get("sources"):
+            meta.append("found by: " + ", ".join(chunk["sources"]))
+        if chunk.get("kept_by_critic"):
+            meta.append("judged relevant by the critic agent")
+        meta_str = f" ({'; '.join(meta)})" if meta else ""
+        lines.append(f"--- {chunk['filename']} [chunk {chunk['chunk_index']}]{meta_str} ---\n{chunk['text']}")
     return "\n\n".join(lines)
 
 

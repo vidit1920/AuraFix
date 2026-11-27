@@ -30,7 +30,8 @@ from agents.issue_agent import understand_issue
 from agents.root_cause_agent import analyze_root_cause
 from agents.patch_agent import generate_patch, validate_diff_applies, apply_diff
 from analyzers.call_graph import build_repo_structure, trace_call_path
-from rag.vector_store import get_or_build_collection, query_collection
+from rag.vector_store import get_or_build_collection, query_collection, collection_chunks
+from rag.agentic import plan_retrieval, retrieve_candidates, critique_candidates
 from validators.test_validator import validate_patch
 from github_integration.pr_agent import (
     build_pr_title,
@@ -134,28 +135,151 @@ def understand_issue_node(state: GraphState) -> dict:
     }
 
 
-def index_repo_node(state: GraphState) -> dict:
-    """Repository Indexing + RAG retrieval: build (or reuse) the embedded
-    collection for this repo+commit, then retrieve the chunks most similar
-    to the bug report. Capped at max_rag_results as a token-budget guard."""
-    collection = get_or_build_collection(
+def _collection(state: GraphState):
+    # Cached per repo+commit+embedder, so calling this again in later
+    # retrieval rounds is a cheap cache hit, not a re-index.
+    return get_or_build_collection(
         repo_path=state["repo_path"],
         repo_id=state["repo_id"],
         commit_hash=state["commit_hash"],
     )
-    rag_chunks = query_collection(
-        collection,
-        state["bug_report"],
-        n_results=state["max_rag_results"],
-    )
+
+
+def _embedding_label() -> str:
+    try:
+        from agents.runtime import get_settings
+        r = get_settings().resolved_embedding()
+        return f"{r.provider}:{r.model}"
+    except Exception:  # noqa: BLE001 — label only
+        return "unknown"
+
+
+def index_repo_node(state: GraphState) -> dict:
+    """Repository Indexing: chunk + embed the repo (or reuse the cached
+    collection for this exact repo, commit and embedding model)."""
+    collection = _collection(state)
+    try:
+        n = collection.count()
+    except Exception:  # noqa: BLE001
+        n = len(collection_chunks(collection))
+    embedding = _embedding_label()
     return {
-        "rag_chunks": rag_chunks,
-        "history": [log_entry(
-            "repo_indexing",
-            f"Retrieved {len(rag_chunks)} relevant code chunk(s) via RAG.",
-            files=sorted({c["filename"] for c in rag_chunks}),
-        )],
+        "index_info": {"chunks": n, "embedding": embedding},
+        "history": [log_entry("repo_indexing", f"Indexed {n} code chunk(s) with {embedding}.",
+                              chunks=n, embedding=embedding)],
     }
+
+
+def plan_retrieval_node(state: GraphState) -> dict:
+    """Multi-agent RAG, agent 1 (Query Planner): several targeted searches,
+    keywords and symbols from the bug report + triaged issue."""
+    use_llm = state.get("retrieval_mode", "multi_agent") == "multi_agent"
+    plan = plan_retrieval(state["bug_report"], state.get("issue"), use_llm=use_llm)
+    how = "LLM planner" if plan["source"] == "llm" else "rule-based plan"
+    if plan.get("fallback_reason"):
+        how += " (planner unavailable, fell back)"
+    return {
+        "retrieval_plan": plan,
+        "retrieval_round": 0,
+        "retrieval_candidates": {},
+        "retrieval_followups": [],
+        "retrieval_needs_more": False,
+        "retrieval_trace": [],
+        "history": [log_entry("query_planner",
+                              f"Planned {len(plan['queries'])} search(es), {len(plan['keywords'])} keyword(s) "
+                              f"and {len(plan['symbols'])} symbol(s) via {how}.",
+                              queries=[q["text"] for q in plan["queries"]],
+                              keywords=plan["keywords"], symbols=plan["symbols"],
+                              fallback_reason=plan.get("fallback_reason"))],
+    }
+
+
+def retrieve_node(state: GraphState) -> dict:
+    """Multi-agent RAG, agent 2 (Retrievers): semantic, lexical and
+    structural search for every planned (or follow-up) query, fused with RRF."""
+    round_no = state.get("retrieval_round", 0) + 1
+    plan = state.get("retrieval_plan") or {"queries": [], "keywords": [], "symbols": []}
+    if round_no == 1:
+        queries = plan["queries"]
+    else:
+        queries = [{"text": q, "intent": "code"} for q in state.get("retrieval_followups") or []]
+
+    collection = _collection(state)
+    corpus = collection_chunks(collection)
+    structures = build_repo_structure(state["repo_path"])
+    per_query = max(state["max_rag_results"], 8)
+
+    result = retrieve_candidates(
+        queries, plan, corpus, structures,
+        semantic_search=lambda q, n: query_collection(collection, q, n_results=max(n, per_query)),
+        previous=state.get("retrieval_candidates") or {},
+        round_no=round_no,
+    )
+    found = result["found"]
+    new = len(result["candidates"]) - len(state.get("retrieval_candidates") or {})
+    summary = (f"Round {round_no}: semantic found {found['semantic']}, keyword {found['lexical']}, "
+               f"structural {found['structural']}; {len(result['candidates'])} unique chunk(s) after fusion")
+    summary += f" ({new} new)." if round_no > 1 else "."
+    if result["errors"]:
+        summary += f" Failed: {', '.join(sorted(result['errors']))}."
+    trace = list(state.get("retrieval_trace") or []) + [{
+        "round": round_no, "queries": [q["text"] for q in queries], "found": found,
+        "errors": result["errors"], "candidates": len(result["candidates"]), "new": new,
+    }]
+    return {
+        "retrieval_round": round_no,
+        "retrieval_candidates": result["candidates"],
+        "retrieval_trace": trace,
+        "history": [log_entry("retrievers", summary, found=found, errors=result["errors"])],
+    }
+
+
+def critique_retrieval_node(state: GraphState) -> dict:
+    """Multi-agent RAG, agent 3 (Relevance Critic): keep what bears on the
+    bug, decide whether it is enough, and ask for follow-up searches if not."""
+    use_llm = state.get("retrieval_mode", "multi_agent") == "multi_agent"
+    round_no = state.get("retrieval_round", 1)
+    trace = list(state.get("retrieval_trace") or [])
+    prev_critic = (trace[-2].get("critic") or {}) if len(trace) >= 2 else {}
+    verdict = critique_candidates(
+        state["bug_report"], state.get("issue"), state.get("retrieval_candidates") or {},
+        max_results=state["max_rag_results"], round_no=round_no,
+        max_rounds=state.get("max_retrieval_rounds", 2), use_llm=use_llm,
+        previous_kept=prev_critic.get("kept"), new_found=trace[-1].get("new") if trace else None,
+    )
+    chunks = verdict["chunks"]
+    if verdict.get("skipped"):
+        summary = "Follow-up searches found no new code; keeping the earlier selection."
+    elif verdict["source"] == "llm":
+        summary = f"Critic kept {len(verdict['kept'])} of {len(state.get('retrieval_candidates') or {})} candidate(s)"
+        summary += ("; context is sufficient." if verdict["sufficient"] else
+                    f"; asking for {len(verdict['follow_up_queries'])} follow-up search(es)."
+                    if verdict["needs_more"] else "; proceeding with the best context found.")
+    else:
+        summary = f"Selected the top {len(chunks)} fused chunk(s) (rule-based"
+        summary += ", critic unavailable)." if verdict.get("fallback_reason") else ")."
+
+    if trace:
+        trace[-1] = {**trace[-1], "critic": {
+            "source": verdict["source"], "kept": verdict["kept"], "sufficient": verdict["sufficient"],
+            "missing": verdict["missing"], "follow_up_queries": verdict["follow_up_queries"],
+            "fallback_reason": verdict.get("fallback_reason"),
+        }}
+    return {
+        "rag_chunks": chunks,
+        "retrieval_needs_more": verdict["needs_more"],
+        "retrieval_followups": verdict["follow_up_queries"],
+        "retrieval_trace": trace,
+        "history": [log_entry("relevance_critic", summary,
+                              files=sorted({c["filename"] for c in chunks}),
+                              missing=verdict["missing"], fallback_reason=verdict.get("fallback_reason"))],
+    }
+
+
+def route_after_critique(state: GraphState) -> str:
+    """Loop back to the retrievers while the critic asks for more (it only
+    does so below max_retrieval_rounds), else continue to code navigation."""
+    return "retrieve" if state.get("retrieval_needs_more") else "navigate_code"
 
 
 def navigate_code_node(state: GraphState) -> dict:
@@ -301,11 +425,14 @@ def validate_node(state: GraphState) -> dict:
     )
 
     targeted = validation.get("targeted_result") or {}
-    summary = (
-        "All tests passed."
-        if validation["overall_passed"]
-        else f"Tests failed ({targeted.get('failed_count', '?')} failing)."
-    )
+    if validation["overall_passed"]:
+        summary = "All tests passed."
+    elif targeted.get("no_tests"):
+        summary = "No tests found in the repository, so the fix could not be verified."
+    elif targeted.get("error") and not targeted.get("failed_count"):
+        summary = "Tests could not run: " + str(targeted["error"]).splitlines()[0][:160]
+    else:
+        summary = f"Tests failed ({targeted.get('failed_count', '?')} failing)."
     return {
         "diff_applies": applies,
         "validation": validation,
@@ -417,6 +544,17 @@ def human_review_node(state: GraphState) -> dict:
 
         if (state.get("diff_applies") or {}).get("applies") is False:
             reason = "Generated patch never applied cleanly; escalated for human review."
+        elif (validation.get("targeted_result") or {}).get("toolchain_missing"):
+            reason = (
+                f"{(validation.get('targeted_result') or {}).get('error')} The fix was not verified; "
+                "escalated for human review. The repo was restored to its original state."
+            )
+        elif (validation.get("targeted_result") or {}).get("no_tests"):
+            reason = (
+                "The repository has no tests, so the fix could not be verified "
+                "automatically; escalated for human review. The repo was restored "
+                "to its original state."
+            )
         else:
             reason = (
                 f"Could not produce a passing fix within {state['max_retries']} attempt(s); "
@@ -460,6 +598,12 @@ def route_after_validation(state: GraphState) -> str:
         confidence = (state.get("root_cause") or {}).get("confidence", 0.0)
         if confidence >= state["confidence_threshold"]:
             return "create_pr"
+        return "human_review"
+
+    # No tests in the repo, or no toolchain to run them: a new patch can't
+    # change that, so retrying only repeats slow LLM calls. Escalate now.
+    targeted = validation.get("targeted_result") or {}
+    if targeted.get("no_tests") or targeted.get("toolchain_missing"):
         return "human_review"
 
     if state["attempt"] >= state["max_retries"]:

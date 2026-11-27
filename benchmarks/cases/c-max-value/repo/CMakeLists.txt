@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(stats C)
+enable_testing()
+add_library(stats src/stats.c)
+target_include_directories(stats PUBLIC include)
+add_executable(test_stats tests/test_stats.c)
+target_link_libraries(test_stats stats)
+add_test(NAME test_stats COMMAND test_stats)

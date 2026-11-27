@@ -1,0 +1,10 @@
+{
+  "id": "java-bounded-stack",
+  "language": "Java",
+  "bug_report": "Pushing onto a full BoundedStack crashes with ArrayIndexOutOfBoundsException instead of throwing 'stack is full', and isFull() never returns true.",
+  "expected_files": [
+    "src/main/java/collections/BoundedStack.java"
+  ],
+  "expected_function": "push",
+  "expected_status": "pr_ready"
+}
