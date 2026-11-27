@@ -41,6 +41,11 @@ def tool_env() -> dict:
         if os.path.isfile(os.path.join(p, "dotnet.exe")) or os.path.isfile(os.path.join(p, "dotnet")):
             env.setdefault("DOTNET_ROOT", p)
             break
+    # .NET 7+ on Linux reserves a large memory-backed file for its W^X code
+    # mapping; under the sandbox's RLIMIT_FSIZE that reservation counts as an
+    # oversized file write and kills the test host ("Testhost process ...
+    # exited with error", found in CI). Turning W^X off keeps the file-size cap.
+    env.setdefault("DOTNET_EnableWriteXorExecute", "0")
     env.setdefault("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
     env.setdefault("DOTNET_NOLOGO", "1")
     env.setdefault("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "1")
