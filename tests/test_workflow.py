@@ -24,6 +24,7 @@ import pytest
 
 import graph.nodes as nodes
 import agents.patch_agent as patch_agent
+import rag.agentic as agentic
 from graph.state import (
     BugFixRequest,
     STATUS_PR_READY,
@@ -84,6 +85,43 @@ def _broken_fix(original: str) -> str:
     )
 
 
+class FakeCollection:
+    """Stands in for a ChromaDB collection: just enough surface for the
+    indexing node and the lexical/structural retrievers."""
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def count(self):
+        return len(self._chunks)
+
+    def get(self, include=None):
+        return {"documents": [c["text"] for c in self._chunks],
+                "metadatas": [{"filename": c["filename"], "chunk_index": c["chunk_index"]}
+                              for c in self._chunks]}
+
+
+def fake_retrieval_llm(critic_rounds_insufficient=0, calls=None):
+    """Canned planner/critic responses. The critic reports 'insufficient'
+    (with a follow-up search) for the first N rounds, then 'sufficient'."""
+    state = {"critic": 0}
+
+    def _call(prompt, system_instruction=None, **kw):
+        if calls is not None:
+            calls.append(system_instruction)
+        if "Query Planner" in (system_instruction or ""):
+            return {"queries": [{"text": "password strip None", "intent": "code"},
+                                {"text": "login crashes on empty password", "intent": "symptom"}],
+                    "keywords": ["password", "strip"], "symbols": ["authenticate"]}
+        state["critic"] += 1
+        if state["critic"] <= critic_rounds_insufficient:
+            return {"relevant_ids": ["auth/auth_service.py::1"], "sufficient": False,
+                    "missing": "the caller", "follow_up_queries": ["handle_login_request"]}
+        return {"relevant_ids": ["auth/auth_service.py::1"], "sufficient": True,
+                "missing": "", "follow_up_queries": []}
+    return _call
+
+
 def _install_common_mocks(monkeypatch, confidence=1.0):
     """Mock the LLM/embedding-backed steps the graph calls, leaving the call
     graph (pure AST), diff application, and pytest real."""
@@ -113,8 +151,10 @@ def _install_common_mocks(monkeypatch, confidence=1.0):
     }]
 
     monkeypatch.setattr(nodes, "understand_issue", lambda bug_report: issue)
-    monkeypatch.setattr(nodes, "get_or_build_collection", lambda **kw: object())
+    monkeypatch.setattr(nodes, "get_or_build_collection", lambda **kw: FakeCollection(rag_chunks))
     monkeypatch.setattr(nodes, "query_collection", lambda c, q, n_results=5: rag_chunks)
+    # Multi-agent RAG: deterministic Query Planner + Relevance Critic.
+    monkeypatch.setattr(agentic, "call_llm_json", fake_retrieval_llm())
     monkeypatch.setattr(nodes, "analyze_root_cause",
                         lambda issue_report, call_graph_trace=None, rag_chunks=None: dict(diagnosis))
 
@@ -206,3 +246,154 @@ def test_low_confidence_gate_blocks_pr(monkeypatch, clean_repo):
     assert final["status"] == STATUS_NEEDS_HUMAN_REVIEW
     assert final["validation"]["overall_passed"] is True   # tests DID pass
     assert "confidence" in final["outcome_reason"].lower()
+
+
+def test_no_tests_escalates_without_retrying(monkeypatch, clean_repo):
+    """A repo with no tests can never validate, so retrying only burns LLM
+    calls. The graph must escalate after the first attempt, not loop."""
+    original = _pristine_source()
+    _install_common_mocks(monkeypatch, confidence=1.0)
+    monkeypatch.setattr(patch_agent, "call_llm", lambda *a, **k: _good_fix(original))
+    no_tests = {"passed": False, "total": 0, "passed_count": 0, "failed_count": 0,
+                "failed_tests": [], "error": "No tests were collected.", "no_tests": True}
+    monkeypatch.setattr(nodes, "validate_patch", lambda *a, **k: {
+        "targeted_result": no_tests, "full_suite_result": None, "overall_passed": False})
+
+    final = run_pipeline(_request(max_retries=3))
+
+    assert final["status"] == STATUS_NEEDS_HUMAN_REVIEW
+    assert final["attempt"] == 1
+    assert "no tests" in final["outcome_reason"].lower()
+
+
+def test_on_step_reports_each_stage(monkeypatch, clean_repo):
+    """run_pipeline(on_step=...) must report every history entry, in order,
+    and return the same final state as a plain run."""
+    original = _pristine_source()
+    _install_common_mocks(monkeypatch, confidence=1.0)
+    monkeypatch.setattr(patch_agent, "call_llm", lambda *a, **k: _good_fix(original))
+
+    seen = []
+    final = run_pipeline(_request(), on_step=seen.append)
+
+    assert final["status"] == STATUS_PR_READY
+    assert [e["node"] for e in seen] == [h["node"] for h in final["history"]]
+    assert seen[0]["node"] == "issue_agent" and seen[-1]["node"] == "pr_agent"
+
+
+
+def test_retrieval_agents_run_and_feed_root_cause(monkeypatch, clean_repo):
+    """Planner -> retrievers -> critic run in order before navigation, and
+    the critic's pick reaches the Root Cause Agent with provenance."""
+    original = _pristine_source()
+    _install_common_mocks(monkeypatch, confidence=1.0)
+    monkeypatch.setattr(patch_agent, "call_llm", lambda *a, **k: _good_fix(original))
+    seen = {}
+    monkeypatch.setattr(nodes, "analyze_root_cause",
+                        lambda issue_report, call_graph_trace=None, rag_chunks=None:
+                        seen.setdefault("rag", rag_chunks) and {
+                            "root_cause": "x", "confidence": 1.0,
+                            "affected_files": ["auth/auth_service.py"], "affected_function": "authenticate",
+                            "reasoning": ["r"]})
+
+    final = run_pipeline(_request())
+
+    order = [h["node"] for h in final["history"]]
+    assert order[:5] == ["issue_agent", "repo_indexing", "query_planner", "retrievers", "relevance_critic"]
+    assert order.index("relevance_critic") < order.index("code_navigation")
+    top = seen["rag"][0]
+    assert top["filename"] == "auth/auth_service.py" and top["kept_by_critic"] is True
+    assert "semantic" in top["sources"]
+    assert final["retrieval_trace"][0]["critic"]["sufficient"] is True
+
+
+def test_critic_follow_up_loops_back_to_retrievers(monkeypatch, clean_repo):
+    """An unsatisfied critic sends the graph back to the retrievers with its
+    follow-up searches, once, then the run continues."""
+    original = _pristine_source()
+    _install_common_mocks(monkeypatch, confidence=1.0)
+    monkeypatch.setattr(agentic, "call_llm_json", fake_retrieval_llm(critic_rounds_insufficient=1))
+    monkeypatch.setattr(patch_agent, "call_llm", lambda *a, **k: _good_fix(original))
+
+    final = run_pipeline(_request(max_retrieval_rounds=2))
+
+    nodes_run = [h["node"] for h in final["history"]]
+    assert nodes_run.count("retrievers") == 2
+    assert nodes_run.count("relevance_critic") == 2
+    assert final["retrieval_trace"][1]["queries"] == ["handle_login_request"]
+    assert final["status"] == STATUS_PR_READY
+
+
+def test_retrieval_rounds_are_capped(monkeypatch, clean_repo):
+    """A critic that is never satisfied cannot loop forever."""
+    original = _pristine_source()
+    _install_common_mocks(monkeypatch, confidence=1.0)
+    monkeypatch.setattr(agentic, "call_llm_json", fake_retrieval_llm(critic_rounds_insufficient=99))
+    monkeypatch.setattr(patch_agent, "call_llm", lambda *a, **k: _good_fix(original))
+    # Every search turns up one new chunk, so only the round cap can stop it.
+    counter = {"n": 0}
+
+    def fresh(c, q, n_results=5):
+        counter["n"] += 1
+        return [{"text": f"x = {counter['n']}", "filename": "auth/db.py", "chunk_index": 100 + counter["n"],
+                 "distance": 0.5}]
+    monkeypatch.setattr(nodes, "query_collection", fresh)
+
+    final = run_pipeline(_request(max_retrieval_rounds=3))
+
+    assert [h["node"] for h in final["history"]].count("retrievers") == 3
+    assert final["status"] == STATUS_PR_READY
+
+
+def test_follow_up_that_finds_nothing_new_skips_the_critic_call(monkeypatch, clean_repo):
+    """If a follow-up round adds no new code, the critic is not asked again
+    (it would see exactly the same evidence): one LLM call saved."""
+    original = _pristine_source()
+    _install_common_mocks(monkeypatch, confidence=1.0)
+    calls = []
+    monkeypatch.setattr(agentic, "call_llm_json", fake_retrieval_llm(critic_rounds_insufficient=99, calls=calls))
+    monkeypatch.setattr(patch_agent, "call_llm", lambda *a, **k: _good_fix(original))
+
+    final = run_pipeline(_request(max_retrieval_rounds=3))
+
+    critic_calls = [c for c in calls if "Relevance Critic" in (c or "")]
+    assert len(critic_calls) == 1
+    assert [h["node"] for h in final["history"]].count("retrievers") == 2
+    assert "no new code" in final["history"][[h["node"] for h in final["history"]].index("relevance_critic", 5)]["summary"]
+    assert final["status"] == STATUS_PR_READY
+
+
+def test_fast_mode_makes_no_retrieval_llm_calls(monkeypatch, clean_repo):
+    """Fast retrieval uses the rule-based plan and fused ranking only."""
+    original = _pristine_source()
+    _install_common_mocks(monkeypatch, confidence=1.0)
+    calls = []
+    monkeypatch.setattr(agentic, "call_llm_json", fake_retrieval_llm(calls=calls))
+    monkeypatch.setattr(patch_agent, "call_llm", lambda *a, **k: _good_fix(original))
+
+    final = run_pipeline(_request(retrieval_mode="fast"))
+
+    assert calls == []
+    assert final["status"] == STATUS_PR_READY
+    assert final["rag_chunks"][0]["filename"] == "auth/auth_service.py"
+
+
+def test_missing_toolchain_escalates_without_retrying(monkeypatch, clean_repo):
+    """Regression (found live on sample-java without Maven): a missing test
+    toolchain used to burn all 3 fix attempts. It must escalate at once."""
+    original = _pristine_source()
+    _install_common_mocks(monkeypatch, confidence=1.0)
+    monkeypatch.setattr(patch_agent, "call_llm", lambda *a, **k: _good_fix(original))
+    missing = {"passed": False, "total": 0, "passed_count": 0, "failed_count": 0, "failed_tests": [],
+               "error": "'mvn' is not installed on this server, so the Java tests could not run.",
+               "toolchain_missing": True}
+    monkeypatch.setattr(nodes, "validate_patch", lambda *a, **k: {
+        "targeted_result": missing, "full_suite_result": None, "overall_passed": False})
+
+    final = run_pipeline(_request(max_retries=3))
+
+    assert final["status"] == STATUS_NEEDS_HUMAN_REVIEW
+    assert final["attempt"] == 1
+    assert "mvn" in final["outcome_reason"] and "not verified" in final["outcome_reason"]
+    validator = [h for h in final["history"] if h["node"] == "test_validator"][0]
+    assert validator["summary"].startswith("Tests could not run")

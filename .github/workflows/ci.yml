@@ -1,0 +1,111 @@
+# Continuous checks for AuraFix.
+#
+#   unit-tests         every push / PR: the offline test suite (LLM calls mocked,
+#                      real git apply + real pytest).
+#   languages-offline  every push / PR: the benchmark corpus through AuraFix's
+#                      test runner for Python, Java (Maven), C# (.NET 8), C and
+#                      C++ (CMake + make). Each buggy repo must fail its tests and
+#                      its reference fix must pass. No API key needed.
+#   live-benchmark     weekly + on demand: the full AuraFix pipeline (real LLM) on
+#                      every benchmark repo, scored and uploaded as an artifact.
+#                      Needs the GEMINI_API_KEY repository secret; skipped without it.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Retrieval mode for the live benchmark"
+        default: fast
+        type: choice
+        options: [fast, multi_agent]
+  schedule:
+    - cron: "0 3 * * 1"  # Mondays 03:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m pytest tests/ -q
+
+  languages-offline:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: C/C++ toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build build-essential
+      - run: pip install -r requirements.txt
+      - name: Buggy repos fail, reference fixes pass (every language)
+        run: python -m benchmarks.run_benchmark --offline
+      - if: always()
+        run: cat benchmarks/results/offline-latest.md >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-benchmark
+          path: benchmarks/results/offline-latest.*
+
+  live-benchmark:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build build-essential
+      - run: pip install -r requirements.txt
+      - name: Live benchmark (real LLM)
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "GEMINI_API_KEY secret not set; skipping the live benchmark." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python -m benchmarks.run_benchmark --mode "${{ inputs.mode || 'fast' }}" --embed local
+      - if: always()
+        run: cat benchmarks/results/live-latest.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-benchmark
+          path: benchmarks/results/live-latest.*
+          if-no-files-found: ignore

@@ -25,6 +25,30 @@ import os
 import json
 import shutil
 import subprocess
+import sys
+
+
+def tool_env() -> dict:
+    """Environment for test subprocesses. AURAFIX_TOOL_PATHS (os.pathsep-
+    separated) is put in front of PATH, so toolchains installed in user folders
+    (Maven, a user-local .NET SDK, MSYS2 CMake/Ninja/make) are found without
+    changing the system PATH."""
+    env = dict(os.environ)
+    extra = [p for p in (env.get("AURAFIX_TOOL_PATHS") or "").split(os.pathsep) if p.strip()]
+    if extra:
+        env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
+    for p in extra:  # a user-local .NET SDK needs DOTNET_ROOT for its test host
+        if os.path.isfile(os.path.join(p, "dotnet.exe")) or os.path.isfile(os.path.join(p, "dotnet")):
+            env.setdefault("DOTNET_ROOT", p)
+            break
+    env.setdefault("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+    env.setdefault("DOTNET_NOLOGO", "1")
+    env.setdefault("DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "1")
+    return env
+
+
+def which(exe: str) -> str | None:
+    return shutil.which(exe, path=tool_env().get("PATH"))
 
 
 def _sandbox_kwargs(cpu_seconds: int, limit_mem: bool = True) -> dict:
@@ -128,7 +152,9 @@ def run_tests(repo_path: str, test_path: str = None, timeout: int = 120) -> dict
     if os.path.exists(report_path):
         os.remove(report_path)
 
-    cmd = ["pytest", "--json-report", f"--json-report-file={report_filename}"]
+    # The interpreter running AuraFix, not whatever `pytest` is first on PATH
+    # (which may belong to another Python without pytest-json-report).
+    cmd = [sys.executable, "-m", "pytest", "--json-report", f"--json-report-file={report_filename}"]
     if test_path:
         cmd.extend(test_path.split(" "))
 
@@ -139,6 +165,7 @@ def run_tests(repo_path: str, test_path: str = None, timeout: int = 120) -> dict
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=tool_env(),
             **_sandbox_kwargs(timeout),
         )
     except subprocess.TimeoutExpired:
@@ -221,6 +248,9 @@ def run_tests(repo_path: str, test_path: str = None, timeout: int = 120) -> dict
         "failed_count": summary.get("failed", 0),
         "failed_tests": failed_tests,
         "error": error,
+        # The repo simply has no tests. Not the patch's fault, so the
+        # orchestrator must not burn retries (and LLM quota) on it.
+        "no_tests": total == 0 and not collection_errors,
     }
 
 
@@ -305,11 +335,12 @@ def detect_runner(repo_path: str, affected_files: list | None = None) -> dict:
     return {"language": "C/C++", "steps": [["make", "test"]]}
 
 
-def _external_fail(error: str) -> dict:
+def _external_fail(error: str, toolchain_missing: bool = False) -> dict:
     """A run_tests-shaped failure result for the non-Python path (e.g. the
-    toolchain isn't installed)."""
+    toolchain isn't installed). ``toolchain_missing`` tells the orchestrator
+    that no patch can make this pass, so it must not spend retries on it."""
     return {"passed": False, "total": 0, "passed_count": 0, "failed_count": 0,
-            "failed_tests": [], "error": error}
+            "failed_tests": [], "error": error, "toolchain_missing": toolchain_missing}
 
 
 def _run_external_steps(repo_path: str, steps: list, language: str, timeout: int = 900) -> dict:
@@ -322,20 +353,25 @@ def _run_external_steps(repo_path: str, steps: list, language: str, timeout: int
     rather than a confusing crash.
     """
     exe = steps[0][0]
-    if not os.path.isabs(exe) and shutil.which(exe) is None:
+    if not os.path.isabs(exe) and which(exe) is None:
         return _external_fail(
-            f"'{exe}' was not found on PATH — install the {language} toolchain to validate {language} fixes."
+            f"'{exe}' is not installed on this server, so the {language} tests could not run. "
+            f"Install the {language} toolchain to validate {language} fixes.",
+            toolchain_missing=True,
         )
 
     transcript = []
     for cmd in steps:
         try:
-            proc = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True, timeout=timeout,
-                                   **_sandbox_kwargs(timeout, limit_mem=False))
+            resolved = [which(cmd[0]) or cmd[0]] + list(cmd[1:])
+            proc = subprocess.run(resolved, cwd=repo_path, capture_output=True, text=True, timeout=timeout,
+                                  env=tool_env(), encoding="utf-8", errors="replace",
+                                  **_sandbox_kwargs(timeout, limit_mem=False))
         except subprocess.TimeoutExpired:
             return _external_fail(f"`{' '.join(cmd)}` timed out after {timeout}s.")
         except FileNotFoundError:
-            return _external_fail(f"'{cmd[0]}' not found — install the {language} toolchain.")
+            return _external_fail(f"'{cmd[0]}' is not installed on this server — install the "
+                                  f"{language} toolchain.", toolchain_missing=True)
         transcript.append(f"$ {' '.join(cmd)}\n{(proc.stdout or '')}{(proc.stderr or '')}")
         if proc.returncode != 0:
             tail = "\n".join(transcript)[-3000:]

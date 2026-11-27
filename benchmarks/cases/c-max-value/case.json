@@ -1,0 +1,10 @@
+{
+  "id": "c-max-value",
+  "language": "C",
+  "bug_report": "max_value returns 0 for temperatures that are all below zero: {-7, -2, -9} gives 0 instead of -2.",
+  "expected_files": [
+    "src/stats.c"
+  ],
+  "expected_function": "max_value",
+  "expected_status": "pr_ready"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "py-pagination",
+  "language": "Python",
+  "bug_report": "The product list skips the first page: page 1 shows products 11-20 instead of 1-10, and the last page comes back empty.",
+  "expected_files": [
+    "inventory/pagination.py"
+  ],
+  "expected_function": "paginate",
+  "expected_status": "pr_ready"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "py-config-parser",
+  "language": "Python",
+  "bug_report": "Settings whose value contains an equals sign get cut off. DATABASE_URL=postgres://db/app?sslmode=require is read as 'postgres://db/app?sslmode'.",
+  "expected_files": [
+    "appconfig/parser.py"
+  ],
+  "expected_function": "parse_config",
+  "expected_status": "pr_ready"
+}

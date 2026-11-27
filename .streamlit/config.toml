@@ -1,17 +1,20 @@
 # AuraFix theme + runtime config.
 #
-# Theme: muted dark, a single restrained accent, flat. No gradients, glass,
-# neon, pure black/white, or soft (large) corner radii.
+# Theme: warm charcoal, one amber accent. Success stays green and warnings
+# orange so they never read as the accent. Colours meet WCAG AA contrast on
+# both the page and card backgrounds. Fonts are the system UI stack: the
+# app's CSP only allows self-hosted fonts.
 [theme]
 base = "dark"
-primaryColor = "#5b8def"          # restrained steel blue (the one accent)
-backgroundColor = "#14161b"       # soft charcoal, not pure black
-secondaryBackgroundColor = "#1b1e26"
-textColor = "#e6e8ee"
-borderColor = "#2a2e39"
+primaryColor = "#F59E0B"          # amber (primary buttons get dark text in CSS)
+backgroundColor = "#151311"       # warm charcoal
+secondaryBackgroundColor = "#1E1B18"
+textColor = "#E7E5E4"
+borderColor = "#3A332C"
+linkColor = "#FBBF24"
 showWidgetBorder = true
-baseRadius = "0.25rem"            # crisp corners, not pill-soft
-font = "sans-serif"               # system sans; not Inter/Geist/Space Grotesk
+baseRadius = "0.5rem"
+font = "sans-serif"
 
 [server]
 headless = true

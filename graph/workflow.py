@@ -6,9 +6,16 @@ drive: hand it a BugFixRequest, get back a fully-populated GraphState with
 the diagnosis, the patch, the validation result, the PR (or the reason one
 wasn't opened), and a step-by-step history for the explainability view.
 
-The graph is mostly linear — issue → index → navigate → root cause →
-patch → validate — with one conditional edge after validation that encodes
-every interesting decision in the system:
+The graph is mostly linear — issue → index → multi-agent retrieval →
+navigate → root cause → patch → validate. Retrieval (rag/agentic.py) is its
+own small agent loop:
+
+  plan_retrieval ──► retrieve ──► critique_retrieval ──► navigate_code
+                        ▲                 │
+                        └── follow-ups ───┘   (critic not satisfied, < max rounds)
+
+and one conditional edge after validation encodes every interesting
+decision in the fix loop:
 
         ┌─────────────────────────────────────────────┐
         │                                             │ retry (< max)
@@ -63,6 +70,9 @@ def build_workflow():
 
     builder.add_node("understand_issue", nodes.understand_issue_node)
     builder.add_node("index_repo", nodes.index_repo_node)
+    builder.add_node("plan_retrieval", nodes.plan_retrieval_node)
+    builder.add_node("retrieve", nodes.retrieve_node)
+    builder.add_node("critique_retrieval", nodes.critique_retrieval_node)
     builder.add_node("navigate_code", nodes.navigate_code_node)
     builder.add_node("root_cause", nodes.root_cause_node)
     builder.add_node("generate_patch", nodes.generate_patch_node)
@@ -73,7 +83,16 @@ def build_workflow():
     # Linear spine.
     builder.add_edge(START, "understand_issue")
     builder.add_edge("understand_issue", "index_repo")
-    builder.add_edge("index_repo", "navigate_code")
+    # Multi-agent RAG: planner -> retrievers -> critic, looping back to the
+    # retrievers while the critic asks for follow-up searches.
+    builder.add_edge("index_repo", "plan_retrieval")
+    builder.add_edge("plan_retrieval", "retrieve")
+    builder.add_edge("retrieve", "critique_retrieval")
+    builder.add_conditional_edges(
+        "critique_retrieval",
+        nodes.route_after_critique,
+        {"retrieve": "retrieve", "navigate_code": "navigate_code"},
+    )
     builder.add_edge("navigate_code", "root_cause")
     builder.add_edge("root_cause", "generate_patch")
     builder.add_edge("generate_patch", "validate")
@@ -100,13 +119,16 @@ def build_workflow():
 _APP = build_workflow()
 
 
-def run_pipeline(request: BugFixRequest | dict) -> GraphState:
+def run_pipeline(request: BugFixRequest | dict, on_step=None) -> GraphState:
     """
     Runs the full pipeline for a single bug report.
 
     Args:
         request: a BugFixRequest, or a plain dict that can construct one
             (convenient for the Streamlit form / JSON API).
+        on_step: optional callback, called with each node's history entry
+            ({"node", "summary", ...}) as soon as that node finishes. Lets the
+            UI show live progress instead of one long silent spinner.
 
     Returns:
         The final GraphState. This never raises: if any agent throws, the
@@ -119,12 +141,34 @@ def run_pipeline(request: BugFixRequest | dict) -> GraphState:
 
     state = initial_state(request)
 
+    config = {"recursion_limit": RECURSION_LIMIT}
     try:
-        final = _APP.invoke(state, config={"recursion_limit": RECURSION_LIMIT})
+        if on_step is None:
+            return _APP.invoke(state, config=config)
+
+        # Stream full-state snapshots; each node appends one history entry, so
+        # the newest entry identifies the step that just completed.
+        final = state
+        seen = 0
+        for snapshot in _APP.stream(state, config=config, stream_mode="values"):
+            final = snapshot
+            history = snapshot.get("history") or []
+            for entry in history[seen:]:
+                try:
+                    on_step(entry)
+                except Exception:  # noqa: BLE001 — a UI callback must never kill a run
+                    pass
+            seen = len(history)
         return final
     except Exception as e:  # noqa: BLE001 — top-level guard for the UI
+        from agents.llm_client import ProviderError
         state["status"] = STATUS_ERROR
-        state["outcome_reason"] = f"Pipeline aborted: {type(e).__name__}: {e}"
+        if isinstance(e, ProviderError):
+            # Plain-language and key-free: safe to show users in production.
+            state["error_kind"] = "provider"
+            state["outcome_reason"] = str(e)
+        else:
+            state["outcome_reason"] = f"Pipeline aborted: {type(e).__name__}: {e}"
         state["history"] = state.get("history", []) + [
             log_entry("pipeline", "Aborted with an unhandled error.",
                       error=str(e), traceback=traceback.format_exc())

@@ -21,7 +21,8 @@ It is built to run as a **hosted, multi-user app**:
 | Stage | Module | What it does |
 |-------|--------|--------------|
 | Issue understanding | `agents/issue_agent.py` | Parses the bug report into structured JSON |
-| Repo indexing (RAG) | `rag/` | Chunks + embeds the repo into ChromaDB, retrieves relevant code |
+| Repo indexing | `rag/vector_store.py` | Chunks + embeds the repo into ChromaDB (SFR-Embedding-Code-400M when installed) |
+| Multi-agent RAG | `rag/agentic.py` | Query Planner (LLM) -> semantic, keyword (BM25) and call-graph retrievers -> rank fusion -> Relevance Critic (LLM), looping for follow-up searches |
 | Code navigation | `analyzers/` | Call-graph trace of the real execution path (Python `ast` + tree-sitter) |
 | Root cause | `agents/root_cause_agent.py` | Combines the evidence into a diagnosis + confidence |
 | Patch / fix | `agents/patch_agent.py` | Generates a minimal unified diff (retries with failure context) |
@@ -56,6 +57,32 @@ streamlit run ui/app.py
 # Production-style (adds security headers via the ASGI launcher):
 python server.py
 ```
+
+### Optional: SFR code embeddings
+
+[Salesforce/SFR-Embedding-Code-400M_R](https://huggingface.co/Salesforce/SFR-Embedding-Code-400M_R)
+is a code-retrieval model that finds relevant code noticeably better than the
+default MiniLM. It runs locally with no key, but needs about 2 GB of RAM and
+downloads ~870 MB on first use, so it is not part of `requirements.txt` (it
+does not fit Render's free 512 MB instance):
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements-sfr.txt
+```
+
+When installed it becomes the default on the Setup page; otherwise the app uses
+MiniLM. The weights are licensed **CC-BY-NC-4.0** (research / non-commercial
+use only). Its custom model code needs transformers 4.x (pinned in
+`requirements-sfr.txt`).
+
+### Retrieval modes
+
+- **Multi-agent RAG** (default): a planner agent writes several searches, three
+  retriever agents run them (semantic, keyword, call graph), and a critic agent
+  keeps what matters and can request one more round. Costs 2 to 3 extra LLM calls.
+- **Fast**: one round with a rule-based plan and no extra LLM calls. Useful on
+  free-tier keys with tight daily quotas.
 
 Open <http://localhost:8501>.
 
@@ -125,6 +152,36 @@ Deterministic, offline (no API calls - real `git apply` + real `pytest`):
 ```bash
 python -m pytest tests/ -v
 ```
+
+### Benchmark (every supported language)
+
+`benchmarks/cases/` holds small repositories with one real bug each, tests that
+fail because of it, and a reference fix: 4 Python, 2 Java, 2 C#, 2 C and 2 C++,
+plus the three bundled samples.
+
+```bash
+# No LLM: every buggy repo must fail its tests and every reference fix must pass,
+# through AuraFix's own test runner (needs Maven, .NET 8 SDK, CMake + Ninja/make).
+python -m benchmarks.run_benchmark --offline
+
+# Live: run the full pipeline on every repo and score it (status, right file and
+# function, and an independent re-run of the tests on the patched code).
+python -m benchmarks.run_benchmark --mode multi_agent --embed sfr
+python -m benchmarks.run_benchmark --only java-,cs- --resume   # subsets / resume
+```
+
+Scorecards land in `benchmarks/results/` (`*-latest.md`). If a model hits its
+quota the runner moves to the next one in `--models`; `--resume` skips cases
+already solved, so a free-tier key can finish across sessions. Toolchains
+installed outside PATH can be listed in `AURAFIX_TOOL_PATHS`.
+
+### Continuous checks (GitHub Actions)
+
+`.github/workflows/ci.yml` runs on every push and pull request: the unit tests,
+and the offline benchmark with Java, .NET 8 and C/C++ toolchains installed, so a
+broken test runner for any language fails the build. A weekly (and on-demand)
+job runs the live benchmark when the `GEMINI_API_KEY` repository secret is set
+and uploads the scorecard.
 
 ---
 

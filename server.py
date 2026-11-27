@@ -17,6 +17,9 @@ import os
 
 import streamlit as st
 from starlette.middleware import Middleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from security.headers import SecurityHeadersMiddleware
 
@@ -24,7 +27,18 @@ from security.headers import SecurityHeadersMiddleware
 # matter.
 _APP_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "app.py")
 
-app = st.App(_APP_SCRIPT, middleware=[Middleware(SecurityHeadersMiddleware)])
+
+async def health(request: Request) -> JSONResponse:
+    """Cheap liveness probe for uptime pingers (keeps the free Render instance
+    from spinning down). Runs no Streamlit script and needs no sign-in."""
+    return JSONResponse({"status": "ok"})
+
+
+app = st.App(
+    _APP_SCRIPT,
+    routes=[Route("/api/health", health, methods=["GET"])],
+    middleware=[Middleware(SecurityHeadersMiddleware)],
+)
 
 
 def main() -> None:

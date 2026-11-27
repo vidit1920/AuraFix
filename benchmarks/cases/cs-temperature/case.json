@@ -1,0 +1,10 @@
+{
+  "id": "cs-temperature",
+  "language": "C#",
+  "bug_report": "Converting 212\u00b0F to Celsius shows 195 instead of 100. Fahrenheit to Celsius is wrong; Celsius to Fahrenheit is fine.",
+  "expected_files": [
+    "src/Temperature.cs"
+  ],
+  "expected_function": "FahrenheitToCelsius",
+  "expected_status": "pr_ready"
+}

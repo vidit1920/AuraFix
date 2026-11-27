@@ -1,0 +1,10 @@
+{
+  "id": "cpp-median",
+  "language": "C++",
+  "bug_report": "median() is wrong for an even number of values: the median of {4, 1, 3, 2} comes back as 3 instead of 2.5.",
+  "expected_files": [
+    "src/stats.cpp"
+  ],
+  "expected_function": "median",
+  "expected_status": "pr_ready"
+}

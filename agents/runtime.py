@@ -38,7 +38,19 @@ from dataclasses import dataclass
 # that speaks the OpenAI Chat Completions API (Groq, OpenRouter, Together,
 # Mistral, a local Ollama/llama.cpp server, …) via a custom base URL.
 CHAT_PROVIDERS = ("gemini", "openai", "anthropic", "openai_compatible")
-EMBED_PROVIDERS = ("auto", "local", "gemini", "openai")
+EMBED_PROVIDERS = ("auto", "local", "sfr", "gemini", "openai")
+
+# Salesforce's code-retrieval embedding model (400M params, 1024-dim, CLS
+# pooling). Runs locally via sentence-transformers, no key. Licensed
+# CC-BY-NC-4.0 (research / non-commercial use only).
+SFR_MODEL_ID = "Salesforce/SFR-Embedding-Code-400M_R"
+
+
+def sfr_available() -> bool:
+    """True when the optional SFR dependencies (torch + sentence-transformers,
+    see requirements-sfr.txt) are installed. Imports nothing heavy."""
+    import importlib.util
+    return all(importlib.util.find_spec(m) is not None for m in ("torch", "sentence_transformers"))
 
 # A sensible, current default chat model per provider. gemini-2.5-flash is
 # being retired (Oct 2026), so the Gemini default points at the maintained
@@ -88,6 +100,9 @@ class LLMSettings:
 
         if provider == "local":
             return EmbedResolution("local", "all-MiniLM-L6-v2", "", None)
+
+        if provider == "sfr":
+            return EmbedResolution("sfr", SFR_MODEL_ID, "", None)
 
         if provider == "gemini":
             key = self.embed_api_key or (self.chat_api_key if self.chat_provider == "gemini" else "")

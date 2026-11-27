@@ -1,0 +1,10 @@
+{
+  "id": "cpp-matrix-transpose",
+  "language": "C++",
+  "bug_report": "transpose() crashes with std::out_of_range on non-square matrices, e.g. a 2x3 matrix. It only works for square ones.",
+  "expected_files": [
+    "src/matrix.cpp"
+  ],
+  "expected_function": "transpose",
+  "expected_status": "pr_ready"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "py-shared-cart",
+  "language": "Python",
+  "bug_report": "When two customers start shopping, the second customer's new cart already contains the first customer's items.",
+  "expected_files": [
+    "cart/cart.py"
+  ],
+  "expected_function": "add_item",
+  "expected_status": "pr_ready"
+}

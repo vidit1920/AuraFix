@@ -1,0 +1,10 @@
+{
+  "id": "py-leap-year",
+  "language": "Python",
+  "bug_report": "The date picker shows February 2000 with only 28 days. 2000 was a leap year, so it should have 29.",
+  "expected_files": [
+    "calendar_utils/leap.py"
+  ],
+  "expected_function": "is_leap_year",
+  "expected_status": "pr_ready"
+}
