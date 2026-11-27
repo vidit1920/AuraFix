@@ -36,7 +36,13 @@ if _PROJECT_ROOT not in sys.path:
 
 import streamlit as st
 
-st.set_page_config(page_title="AuraFix", page_icon=":material/auto_fix_high:", layout="wide")
+# Favicon is a local file: a :material/...: page icon is fetched from
+# fonts.gstatic.com, which the production CSP (img-src) blocks.
+st.set_page_config(
+    page_title="AuraFix",
+    page_icon=os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "favicon.png"),
+    layout="wide",
+)
 
 _IMPORT_ERROR = None
 try:
