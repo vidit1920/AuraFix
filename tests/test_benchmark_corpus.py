@@ -51,3 +51,10 @@ def test_loader_includes_bundled_samples():
     ids = {c["id"] for c in load_cases([])}
     assert {"sample-login-crash", "sample-discount-py", "sample-discount-java"} <= ids
     assert len(ids) == len(CASES) + 3
+
+
+def test_dotnet_runs_with_write_xor_execute_off():
+    """Regression (found in Linux CI): .NET's W^X mapping trips the sandbox's
+    RLIMIT_FSIZE and crashes the test host, so the runner must disable it."""
+    from validators.test_validator import tool_env
+    assert tool_env()["DOTNET_EnableWriteXorExecute"] == "0"

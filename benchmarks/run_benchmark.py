@@ -125,8 +125,11 @@ def run_tests(repo: str, case: dict) -> dict:
     t = time.time()
     v = validate_patch(repo, case["expected_files"], run_full_suite_on_pass=True)
     r = v.get("targeted_result") or {}
+    failed = r.get("failed_tests") or []
+    detail = (failed[0].get("error_message") or "") if failed else (r.get("error") or "")
     return {"passed": bool(v.get("overall_passed")), "total": r.get("total"),
             "failed": r.get("failed_count"), "error": (r.get("error") or "")[:400] or None,
+            "detail": str(detail)[-1500:] or None,
             "toolchain_missing": bool(r.get("toolchain_missing")), "no_tests": bool(r.get("no_tests")),
             "language": v.get("language"), "seconds": round(time.time() - t, 1)}
 
@@ -298,6 +301,10 @@ def main() -> int:
             b, f = r.get("buggy") or {}, r.get("fixed") or {}
             print(f"{'ok ' if r['ok'] else 'BAD'}  buggy_passed={b.get('passed')} fixed_passed={f.get('passed')} "
                   f"{r.get('error') or b.get('error') or ''}"[:200])
+            if not r["ok"]:
+                # Show why, so a CI failure is diagnosable from the log alone.
+                bad = f if (f and not f.get("passed")) else b
+                print("      " + str(bad.get("detail") or bad.get("error") or "").replace("\n", "\n      ")[-1500:])
             results.append(r)
         path = write_report(results, "offline")
         print(f"\n{sum(r['ok'] for r in results)}/{len(results)} valid. Report: {path}")
