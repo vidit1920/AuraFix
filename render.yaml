@@ -27,7 +27,7 @@ services:
       - key: APP_ENV
         value: production
       - key: GEMINI_MODEL
-        value: gemini-flash-latest
+        value: gemini-flash-lite-latest
       - key: FIREBASE_PROVIDERS
         value: google,github
       - key: CHROMA_PERSIST_DIR

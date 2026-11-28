@@ -28,7 +28,7 @@ RUN useradd -m -u 10001 appuser \
 # account) are provided at run time, never baked into the image.
 ENV APP_ENV=production \
     HOME=/home/appuser \
-    GEMINI_MODEL=gemini-flash-latest \
+    GEMINI_MODEL=gemini-flash-lite-latest \
     CHROMA_PERSIST_DIR=/tmp/aurafix_chroma
 
 USER appuser
