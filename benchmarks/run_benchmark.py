@@ -277,7 +277,7 @@ def main() -> int:
     ap.add_argument("--mode", default="multi_agent", choices=["multi_agent", "fast"])
     ap.add_argument("--embed", default="local", choices=["local", "sfr", "gemini", "openai", "auto"])
     ap.add_argument("--provider", default="gemini")
-    ap.add_argument("--models", default="gemini-2.5-flash,gemini-2.5-flash-lite,gemini-flash-latest")
+    ap.add_argument("--models", default="gemini-flash-lite-latest,gemini-2.5-flash-lite,gemini-flash-latest")
     ap.add_argument("--base-url", default=None)
     ap.add_argument("--max-retries", type=int, default=3)
     ap.add_argument("--env-file", default=str(PROJECT / ".env"))

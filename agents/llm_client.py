@@ -35,8 +35,6 @@ _FRIENDLY = [
     (("API_KEY_INVALID", "API key not valid", "invalid x-api-key", "Incorrect API key", "401",
       "key was rejected"),
      "The API key was rejected. Check that it is correct and still active."),
-    (("RESOURCE_EXHAUSTED", "429", "rate limit", "quota"),
-     "This key has hit its rate limit or daily quota. Wait a little, or switch to another model or key."),
     (("NOT_FOUND", "404", "is not found", "does not exist", "model not found"),
      "The model was not found. Check the model name on the Setup page."),
     (("PERMISSION_DENIED", "403", "access denied"),
@@ -46,7 +44,40 @@ _FRIENDLY = [
 ]
 
 
-def friendly_error(raw: str) -> str | None:
+FAST_GEMINI_MODEL = "gemini-flash-lite-latest"
+
+
+def friendly_error(raw: str, model: str | None = None, exc: Exception | None = None,
+                   provider: str | None = None) -> str | None:
+    """A plain-language, key-free explanation of a provider failure, or None
+    if it isn't a recognised provider problem. Quota errors say *which* quota
+    ran out, because the fix differs: wait a minute, switch model, or wait for
+    tomorrow's reset."""
+    name = model or "this model"
+    gemini = provider == "gemini" or (model or "").startswith("gemini")
+    switch = (f" Pick a faster model on the Setup page, such as {FAST_GEMINI_MODEL}." if gemini else
+              " Try again, or pick a faster model on the Setup page.")
+
+    if isinstance(exc, providers.ProviderTimeout) or (raw or "").startswith("timeout:"):
+        return f"{name} didn't answer in time ({raw.split('within ')[-1] if 'within' in raw else 'timed out'})." \
+               " The provider is probably overloaded." + switch
+
+    kind, _ = providers.classify_error(exc if exc is not None else RuntimeError(raw or ""))
+    if kind == "no_quota":
+        return (f"{name} has no free quota for this key." +
+                (f" Pick another model on the Setup page, such as {FAST_GEMINI_MODEL}." if gemini else
+                 " Pick another model, or add billing with the provider."))
+    if kind == "daily_quota":
+        if gemini:
+            return (f"The daily free quota for {name} is used up. Google counts it per Google Cloud "
+                    "project, so a new key from the same project shares it. Pick another model on the "
+                    f"Setup page ({FAST_GEMINI_MODEL} has a much larger free allowance), use a key from "
+                    "a different project, or wait for the daily reset at midnight Pacific time.")
+        return "This key has no quota or credit left. Add billing credit with the provider, or use another key."
+    if kind == "per_minute":
+        return (f"Too many requests per minute for {name} (a rate limit, not your daily quota). "
+                "AuraFix waited and retried, but the limit is still being hit. Wait a minute and run again.")
+
     low = (raw or "").lower()
     for markers, message in _FRIENDLY:
         for m in markers:
@@ -73,6 +104,7 @@ def call_llm(
     model: str | None = None,
     json_mode: bool = False,
     max_retries: int = 4,
+    timeout: float | None = None,
 ) -> str:
     """
     Send a prompt to the active provider and return the text response.
@@ -85,6 +117,8 @@ def call_llm(
             model for a specific step.
         json_mode: if True, ask the model for raw JSON (no markdown fences).
         max_retries: transient-failure retries with exponential backoff.
+        timeout: seconds before a call counts as stuck (default
+            providers.DEFAULT_TIMEOUT_S).
 
     Returns:
         The model's text output. With json_mode=True this is still a JSON
@@ -97,10 +131,11 @@ def call_llm(
         settings = replace(settings, chat_model=model)
 
     try:
-        return providers.chat(settings, prompt, system_instruction, json_mode, max_retries=max_retries)
+        return providers.chat(settings, prompt, system_instruction, json_mode,
+                              max_retries=max_retries, timeout=timeout)
     except Exception as e:  # noqa: BLE001
         raw = _scrub(str(e), settings.chat_api_key, settings.embed_api_key)
-        message = friendly_error(raw)
+        message = friendly_error(raw, model=settings.chat_model, exc=e, provider=settings.chat_provider)
         if message:
             raise ProviderError(message) from None
         raise RuntimeError(raw[:500]) from None

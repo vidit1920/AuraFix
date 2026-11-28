@@ -218,7 +218,7 @@ def test_sfr_embeds_code_meaningfully():
 def test_friendly_provider_errors():
     from agents.llm_client import friendly_error
     assert "rejected" in friendly_error("400 INVALID_ARGUMENT. {'reason': 'API_KEY_INVALID'}")
-    assert "quota" in friendly_error("429 RESOURCE_EXHAUSTED")
+    assert "per minute" in friendly_error("429 RESOURCE_EXHAUSTED")
     assert "overloaded" in friendly_error("503 UNAVAILABLE. high demand")
     assert "not found" in friendly_error("404 NOT_FOUND models/foo is not found")
     assert friendly_error("error on line 4291 of parser") is None

@@ -106,7 +106,8 @@ SRC_SAMPLE, SRC_GITHUB, SRC_LOCAL = "Sample project", "GitHub repository", "Loca
 PROVIDERS = {
     "Google Gemini": {
         "id": "gemini", "needs_base": False,
-        "model_help": "e.g. gemini-flash-latest, gemini-2.5-flash-lite",
+        "model_help": "gemini-flash-lite-latest is fast and has the largest free allowance. "
+                      "gemini-flash-latest is stronger but free keys get only 20 requests a day.",
         "guide": {
             "badge": "Free tier", "badge_kind": "ok",
             "site": "Google AI Studio", "url": "https://aistudio.google.com/apikey",
@@ -116,8 +117,10 @@ PROVIDERS = {
                 "Copy the key. It starts with <code>AIza</code>.",
                 "Paste it into the <b>API key</b> field on this page, then click <b>Test connection</b>.",
             ],
-            "note": "No card needed. The free tier has a daily request limit, and each AuraFix "
-                    "run uses a handful of requests.",
+            "note": "No card needed. Free limits are per model and per Google Cloud project, so a "
+                    "new key from the same project shares them. Keep the model on "
+                    "<code>gemini-flash-lite-latest</code>: it is fast and has the largest free "
+                    "allowance. Each AuraFix run uses about 6 requests.",
         },
     },
     "OpenAI": {
@@ -720,9 +723,10 @@ def _test_connection() -> None:
         st.error(str(e))
         return
     set_settings(settings)
-    with st.spinner("Contacting the provider..."):
+    with st.spinner("Contacting the provider (up to 30 seconds)..."):
         try:
-            reply = call_llm("Reply with the single word OK.", max_retries=1)
+            # Short timeout: a connection check should never spin for minutes.
+            reply = call_llm("Reply with the single word OK.", max_retries=1, timeout=30)
         except Exception as e:  # noqa: BLE001 — message already scrubbed of keys
             st.session_state.pop("key_verified", None)
             msg = str(e).strip() or type(e).__name__

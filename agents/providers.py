@@ -26,14 +26,20 @@ Design rules enforced here:
 
 from __future__ import annotations
 
+import re
 import time
 
 import httpx
 
 from agents.runtime import EmbedResolution, LLMSettings
 
-# LLM calls can legitimately take a while (large prompts, slow free tiers).
-_HTTP_TIMEOUT = httpx.Timeout(120.0, connect=15.0)
+# How long one model call may take before it counts as stuck. Free tiers can be
+# slow, but a call that hasn't answered in this long is overloaded; failing
+# with a clear message beats a spinner that runs for minutes.
+DEFAULT_TIMEOUT_S = 90.0
+# Longest wait AuraFix will honour when a provider says "retry in N seconds"
+# for a per-minute rate limit.
+_MAX_RATE_LIMIT_WAIT_S = 65.0
 
 # Anthropic requires an explicit output cap, and the Patch Agent may rewrite a
 # whole file, so keep it generous.
@@ -45,6 +51,10 @@ class LLMError(RuntimeError):
     so the caller can decide how much to show the user."""
 
 
+class ProviderTimeout(LLMError):
+    """The model did not answer within the timeout."""
+
+
 # --------------------------------------------------------------------------
 # Public entry points
 # --------------------------------------------------------------------------
@@ -54,19 +64,22 @@ def chat(
     system_instruction: str | None,
     json_mode: bool,
     max_retries: int = 4,
+    timeout: float | None = None,
 ) -> str:
-    """Send one prompt, return the model's text. Retries transient failures."""
+    """Send one prompt, return the model's text. Retries transient failures
+    and waits out per-minute rate limits; daily quotas and timeouts fail fast."""
+    t = timeout or DEFAULT_TIMEOUT_S
     provider = settings.chat_provider
     if provider == "gemini":
-        call = lambda: _gemini_chat(settings, prompt, system_instruction, json_mode)
+        call = lambda: _gemini_chat(settings, prompt, system_instruction, json_mode, t)
     elif provider in ("openai", "openai_compatible"):
-        call = lambda: _openai_chat(settings, prompt, system_instruction, json_mode)
+        call = lambda: _openai_chat(settings, prompt, system_instruction, json_mode, t)
     elif provider == "anthropic":
-        call = lambda: _anthropic_chat(settings, prompt, system_instruction, json_mode)
+        call = lambda: _anthropic_chat(settings, prompt, system_instruction, json_mode, t)
     else:
         raise LLMError(f"Unknown chat provider: {provider!r}")
 
-    return _with_retries(call, max_retries)
+    return _with_retries(call, max_retries, t)
 
 
 def embed(resolution: EmbedResolution, texts: list[str]) -> list[list[float]]:
@@ -85,29 +98,71 @@ def embed(resolution: EmbedResolution, texts: list[str]) -> list[list[float]]:
 # --------------------------------------------------------------------------
 # Retry wrapper
 # --------------------------------------------------------------------------
-def _with_retries(call, max_retries: int) -> str:
+def _with_retries(call, max_retries: int, timeout_s: float = DEFAULT_TIMEOUT_S) -> str:
     last_error: Exception | None = None
     for attempt in range(max_retries):
         try:
             return call()
         except LLMError:
             raise  # non-retryable by construction
+        except httpx.TimeoutException:
+            # Retrying a call that already took the full timeout would multiply
+            # the wait (4 x 90s). Fail now with a clear message instead.
+            raise ProviderTimeout(f"timeout: no answer within {int(timeout_s)} seconds") from None
         except Exception as e:  # noqa: BLE001
             last_error = e
-            if _is_transient(e) and attempt < max_retries - 1:
-                time.sleep(2 ** attempt)  # 1s, 2s, 4s, 8s
-                continue
-            raise
+            kind, wait = classify_error(e)
+            if kind in ("daily_quota", "no_quota", "fatal") or attempt >= max_retries - 1:
+                raise
+            if kind == "per_minute":
+                time.sleep(min(wait or 20.0, _MAX_RATE_LIMIT_WAIT_S))
+            else:  # transient: overload, 5xx, network blip
+                time.sleep(2 ** attempt)  # 1s, 2s, 4s
     raise last_error  # pragma: no cover
 
 
-def _is_transient(e: Exception) -> bool:
-    if isinstance(e, (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError)):
-        return True
-    if isinstance(e, httpx.HTTPStatusError):
-        return e.response.status_code in (429, 500, 502, 503, 504)
+def classify_error(e: Exception) -> tuple[str, float | None]:
+    """("daily_quota" | "no_quota" | "per_minute" | "transient" | "fatal",
+    seconds the provider asked us to wait, if it said).
+
+    Gemini's free tier counts requests per model *per Google Cloud project*
+    (quotaId ...PerDayPerProjectPerModel, ...PerMinute...), so a quota error
+    must say which kind it is: a daily quota won't clear by retrying."""
+    if isinstance(e, (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError)):
+        return "transient", None
     text = str(e)
-    return any(code in text for code in ("429", "RESOURCE_EXHAUSTED", "500", "502", "503", "504", "UNAVAILABLE", "INTERNAL"))
+    status = None
+    if isinstance(e, httpx.HTTPStatusError):
+        status = e.response.status_code
+        try:  # the reason (e.g. OpenAI's "insufficient_quota") is in the body
+            text += " " + e.response.text[:4000]
+        except Exception:  # noqa: BLE001 — body may be unread/streamed
+            pass
+    wait = _retry_after(e, text)
+    is_429 = status == 429 or re.search(r"\b429\b", text) or "RESOURCE_EXHAUSTED" in text
+    if is_429:
+        if re.search(r"limit:\s*0\b", text):
+            return "no_quota", wait
+        if "PerDay" in text or "insufficient_quota" in text:
+            return "daily_quota", wait
+        return "per_minute", wait
+    if status in (500, 502, 503, 504, 529) or any(
+            m in text for m in ("500", "502", "503", "504", "UNAVAILABLE", "INTERNAL", "overloaded")):
+        return "transient", wait
+    return "fatal", None
+
+
+def _retry_after(e: Exception, text: str) -> float | None:
+    if isinstance(e, httpx.HTTPStatusError):
+        header = e.response.headers.get("retry-after")
+        if header:
+            try:
+                return float(header)
+            except ValueError:
+                pass
+    m = (re.search(r"retry in ([\d.]+)\s*s", text, re.I)
+         or re.search(r"retryDelay['\"]?:\s*['\"]?([\d.]+)s", text))
+    return float(m.group(1)) + 1.0 if m else None
 
 
 # --------------------------------------------------------------------------
@@ -125,15 +180,19 @@ def _gemini_client(api_key: str):
     return client
 
 
-def _gemini_chat(settings: LLMSettings, prompt: str, system_instruction: str | None, json_mode: bool) -> str:
+def _gemini_chat(settings: LLMSettings, prompt: str, system_instruction: str | None, json_mode: bool,
+                 timeout_s: float = DEFAULT_TIMEOUT_S) -> str:
     from google.genai import types
 
-    config_kwargs: dict = {}
+    # The SDK sets no timeout of its own, so a slow model could hold a request
+    # open for minutes. Its retries stay off (none by default): ours can tell a
+    # daily quota from a per-minute limit.
+    config_kwargs: dict = {"http_options": types.HttpOptions(timeout=int(timeout_s * 1000))}
     if system_instruction:
         config_kwargs["system_instruction"] = system_instruction
     if json_mode:
         config_kwargs["response_mime_type"] = "application/json"
-    config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+    config = types.GenerateContentConfig(**config_kwargs)
 
     response = _gemini_client(settings.chat_api_key).models.generate_content(
         model=settings.chat_model,
@@ -170,7 +229,8 @@ def _openai_base(settings: LLMSettings) -> str:
     return base
 
 
-def _openai_chat(settings: LLMSettings, prompt: str, system_instruction: str | None, json_mode: bool) -> str:
+def _openai_chat(settings: LLMSettings, prompt: str, system_instruction: str | None, json_mode: bool,
+                 timeout_s: float = DEFAULT_TIMEOUT_S) -> str:
     messages = []
     if system_instruction:
         messages.append({"role": "system", "content": system_instruction})
@@ -182,7 +242,7 @@ def _openai_chat(settings: LLMSettings, prompt: str, system_instruction: str | N
 
     headers = {"Authorization": f"Bearer {settings.chat_api_key}"}
     try:
-        data = _post_json(f"{_openai_base(settings)}/chat/completions", headers, body)
+        data = _post_json(f"{_openai_base(settings)}/chat/completions", headers, body, timeout_s)
     except httpx.HTTPStatusError as e:
         # json_object isn't universal across OpenAI-compatible servers; retry
         # once without it before giving up, since the prompts already ask for
@@ -190,7 +250,7 @@ def _openai_chat(settings: LLMSettings, prompt: str, system_instruction: str | N
         if json_mode and e.response.status_code == 400:
             body.pop("response_format", None)
             try:
-                data = _post_json(f"{_openai_base(settings)}/chat/completions", headers, body)
+                data = _post_json(f"{_openai_base(settings)}/chat/completions", headers, body, timeout_s)
             except httpx.HTTPStatusError as e2:
                 raise _as_llm_error(e2)
         else:
@@ -208,7 +268,8 @@ def _openai_embed(resolution: EmbedResolution, texts: list[str]) -> list[list[fl
 # --------------------------------------------------------------------------
 # Anthropic
 # --------------------------------------------------------------------------
-def _anthropic_chat(settings: LLMSettings, prompt: str, system_instruction: str | None, json_mode: bool) -> str:
+def _anthropic_chat(settings: LLMSettings, prompt: str, system_instruction: str | None, json_mode: bool,
+                    timeout_s: float = DEFAULT_TIMEOUT_S) -> str:
     system = system_instruction or ""
     if json_mode:
         system = (system + "\n\nRespond with a single valid JSON object only. "
@@ -224,7 +285,7 @@ def _anthropic_chat(settings: LLMSettings, prompt: str, system_instruction: str 
 
     headers = {"x-api-key": settings.chat_api_key, "anthropic-version": "2023-06-01"}
     try:
-        data = _post_json("https://api.anthropic.com/v1/messages", headers, body)
+        data = _post_json("https://api.anthropic.com/v1/messages", headers, body, timeout_s)
     except httpx.HTTPStatusError as e:
         raise _as_llm_error(e)
 
@@ -327,18 +388,22 @@ def _sfr_embed(texts: list[str]) -> list[list[float]]:
 # --------------------------------------------------------------------------
 # HTTP helper
 # --------------------------------------------------------------------------
-def _post_json(url: str, headers: dict, body: dict) -> dict:
+def _post_json(url: str, headers: dict, body: dict, timeout_s: float = DEFAULT_TIMEOUT_S) -> dict:
     headers = {**headers, "Content-Type": "application/json"}
-    with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+    with httpx.Client(timeout=httpx.Timeout(timeout_s, connect=15.0)) as client:
         resp = client.post(url, headers=headers, json=body)
         resp.raise_for_status()
         return resp.json()
 
 
-def _as_llm_error(e: httpx.HTTPStatusError) -> LLMError:
+def _as_llm_error(e: httpx.HTTPStatusError) -> Exception:
     """Turn a 4xx into a non-retryable LLMError with a short, key-free reason
-    pulled from the vendor's error body when possible."""
+    pulled from the vendor's error body when possible. Rate limits (429) and
+    server errors (5xx) are returned unchanged so the retry loop can wait them
+    out or classify them (per-minute limit vs. daily quota)."""
     status = e.response.status_code
+    if status == 429 or status >= 500:
+        return e
     detail = ""
     try:
         payload = e.response.json()

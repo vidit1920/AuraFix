@@ -311,6 +311,11 @@ def root_cause_node(state: GraphState) -> dict:
     # Normalize affected file paths so downstream patching/diffing matches
     # git's forward-slash convention regardless of what the model emitted.
     diagnosis["affected_files"] = [_norm(f) for f in diagnosis.get("affected_files", [])]
+    # Models sometimes return "path/to/file.py :: func" as the function name;
+    # keep just the function so the UI doesn't print the file twice.
+    fn = diagnosis.get("affected_function")
+    if isinstance(fn, str) and "::" in fn:
+        diagnosis["affected_function"] = fn.rsplit("::", 1)[-1].strip().rstrip("()")
     return {
         "root_cause": diagnosis,
         "history": [log_entry(

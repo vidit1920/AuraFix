@@ -56,7 +56,10 @@ def sfr_available() -> bool:
 # being retired (Oct 2026), so the Gemini default points at the maintained
 # "latest" flash alias rather than a pinned version that will 404.
 DEFAULT_CHAT_MODELS = {
-    "gemini": "gemini-flash-latest",
+    # Flash-Lite: fast (~1-2 s per call) with a far larger free allowance than
+    # Flash, whose free tier is 20 requests/day per model per Google Cloud
+    # project (about 3 multi-agent runs).
+    "gemini": "gemini-flash-lite-latest",
     "openai": "gpt-4o-mini",
     "anthropic": "claude-haiku-4-5",
     "openai_compatible": "llama-3.3-70b-versatile",
